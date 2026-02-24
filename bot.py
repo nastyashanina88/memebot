@@ -37,6 +37,12 @@ SOURCE_CHANNELS = [
     "memnaya_LR",
     "Leomemesmda",
     "rus_mem",
+    "cherdakmemov",
+    "Katzen_und_Politik",
+    "smilemilf",
+    "vsratyikontent",
+    "thresomewhitout",
+    "impirat",
 ]
 
 POSTS_PER_DAY_MIN = 7
