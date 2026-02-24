@@ -384,7 +384,6 @@ class MemeBot:
             await self.app.bot.send_photo(
                 chat_id=MY_CHANNEL,
                 photo=BytesIO(img),
-                caption=caption or "",
             )
             db_update(post_id, "posted")
             logging.info("Мем опубликован в канале")
