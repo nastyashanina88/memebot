@@ -35,6 +35,8 @@ SOURCE_CHANNELS = [
     "stolencatsbyolga",
     "memo4ek",
     "memnaya_LR",
+    "Leomemesmda",
+    "rus_mem",
 ]
 
 POSTS_PER_DAY_MIN = 7
