@@ -18,7 +18,7 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 load_dotenv()
 
@@ -217,11 +217,17 @@ def db_update(post_id: int, status: str):
         db.execute("UPDATE posts SET status=? WHERE id=?", (status, post_id))
         db.commit()
 
+def db_update_caption(post_id: int, caption: str):
+    with sqlite3.connect(DB) as db:
+        db.execute("UPDATE posts SET caption=? WHERE id=?", (caption, post_id))
+        db.commit()
+
 def db_get_approved() -> Optional[tuple]:
     with sqlite3.connect(DB) as db:
         return db.execute(
             "SELECT id, img_url, caption FROM posts WHERE status='approved' ORDER BY added_at ASC LIMIT 1"
         ).fetchone()
+
 
 def db_queue_size() -> int:
     with sqlite3.connect(DB) as db:
@@ -249,17 +255,20 @@ def make_schedule() -> list:
 
 class MemeBot:
     def __init__(self):
-        self.app         = Application.builder().token(BOT_TOKEN).build()
-        self.schedule    = []
-        self.last_fetch  = None
-        self.current_day = None
+        self.app              = Application.builder().token(BOT_TOKEN).build()
+        self.schedule         = []
+        self.last_fetch       = None
+        self.current_day      = None
+        self.pending_caption  = None  # post_id ожидающий подписи
         init_db()
 
         self.app.add_handler(CommandHandler("start", self.cmd_start))
         self.app.add_handler(CommandHandler("queue", self.cmd_queue))
         self.app.add_handler(CommandHandler("post", self.cmd_post))
         self.app.add_handler(CommandHandler("fetch", self.cmd_fetch))
+        self.app.add_handler(CommandHandler("skip", self.cmd_skip_caption))
         self.app.add_handler(CallbackQueryHandler(self.on_button))
+        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
     # ── Команды ──────────────────────────────────────────────────────
 
@@ -309,11 +318,14 @@ class MemeBot:
         post_id = int(post_id)
 
         if action == "approve":
-            db_update(post_id, "approved")
+            self.pending_caption = post_id
             await query.edit_message_reply_markup(
                 InlineKeyboardMarkup([[
-                    InlineKeyboardButton(f"✅ В очереди ({db_queue_size()})", callback_data="noop")
+                    InlineKeyboardButton("✏️ Введи подпись или /skip", callback_data="noop")
                 ]])
+            )
+            await query.message.reply_text(
+                "Напиши подпись для этого мема или /skip чтобы без подписи:"
             )
         elif action == "skip":
             db_update(post_id, "skipped")
@@ -322,6 +334,24 @@ class MemeBot:
                     InlineKeyboardButton("❌ Пропущен", callback_data="noop")
                 ]])
             )
+
+    async def on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Получаем подпись от пользователя после одобрения мема."""
+        if self.pending_caption is None:
+            return
+        caption = update.message.text.strip()
+        db_update_caption(self.pending_caption, caption)
+        db_update(self.pending_caption, "approved")
+        self.pending_caption = None
+        await update.message.reply_text(f"✅ Добавлено в очередь с подписью:\n_{caption}_", parse_mode="Markdown")
+
+    async def cmd_skip_caption(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Одобрить мем без подписи."""
+        if self.pending_caption is None:
+            return
+        db_update(self.pending_caption, "approved")
+        self.pending_caption = None
+        await update.message.reply_text(f"✅ Добавлено в очередь без подписи. В очереди: {db_queue_size()}")
 
     # ── Сбор и отправка мемов ────────────────────────────────────────
 
@@ -392,6 +422,7 @@ class MemeBot:
             await self.app.bot.send_photo(
                 chat_id=MY_CHANNEL,
                 photo=BytesIO(img),
+                caption=caption if caption else None,
             )
             db_update(post_id, "posted")
             logging.info("Мем опубликован в канале")
