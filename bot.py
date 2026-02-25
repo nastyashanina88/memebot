@@ -169,17 +169,23 @@ def init_db():
     with sqlite3.connect(DB) as db:
         db.execute("""
             CREATE TABLE IF NOT EXISTS posts (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                channel   TEXT NOT NULL,
-                msg_id    TEXT NOT NULL,
-                img_url   TEXT,
-                caption   TEXT,
-                status    TEXT DEFAULT 'new',
-                added_at  TEXT DEFAULT (datetime('now')),
-                posted_at TEXT,
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel      TEXT NOT NULL,
+                msg_id       TEXT NOT NULL,
+                img_url      TEXT,
+                caption      TEXT,
+                user_caption TEXT,
+                status       TEXT DEFAULT 'new',
+                added_at     TEXT DEFAULT (datetime('now')),
+                posted_at    TEXT,
                 UNIQUE(channel, msg_id)
             )
         """)
+        # Добавляем колонку если её ещё нет (для старых БД)
+        try:
+            db.execute("ALTER TABLE posts ADD COLUMN user_caption TEXT")
+        except Exception:
+            pass
         db.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
@@ -219,13 +225,13 @@ def db_update(post_id: int, status: str):
 
 def db_update_caption(post_id: int, caption: str):
     with sqlite3.connect(DB) as db:
-        db.execute("UPDATE posts SET caption=? WHERE id=?", (caption, post_id))
+        db.execute("UPDATE posts SET user_caption=? WHERE id=?", (caption, post_id))
         db.commit()
 
 def db_get_approved() -> Optional[tuple]:
     with sqlite3.connect(DB) as db:
         return db.execute(
-            "SELECT id, img_url, caption FROM posts WHERE status='approved' ORDER BY added_at ASC LIMIT 1"
+            "SELECT id, img_url, user_caption FROM posts WHERE status='approved' ORDER BY added_at ASC LIMIT 1"
         ).fetchone()
 
 
