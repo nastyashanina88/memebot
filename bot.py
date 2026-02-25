@@ -57,9 +57,10 @@ FETCH_HOURS_BACK  = 24    # брать посты за последние N ча
 #  КОНФИГ
 # ─────────────────────────────────────────────────────────────────────
 
-BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
-MY_CHANNEL = os.getenv("MY_CHANNEL", "")
-MSK        = pytz.timezone("Europe/Moscow")
+BOT_TOKEN      = os.getenv("BOT_TOKEN", "")
+MY_CHANNEL     = os.getenv("MY_CHANNEL", "")
+ADMIN_CHAT_ID  = os.getenv("ADMIN_CHAT_ID", "")  # задаётся в Railway Variables
+MSK            = pytz.timezone("Europe/Moscow")
 
 # ─────────────────────────────────────────────────────────────────────
 #  ФИЛЬТРЫ
@@ -195,6 +196,9 @@ def init_db():
         db.commit()
 
 def db_get(key: str) -> Optional[str]:
+    # Для admin_chat_id сначала проверяем переменную окружения
+    if key == "admin_chat_id" and ADMIN_CHAT_ID:
+        return ADMIN_CHAT_ID
     with sqlite3.connect(DB) as db:
         r = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return r[0] if r else None
@@ -296,7 +300,9 @@ class MemeBot:
             "❌ — пропустить\n\n"
             "/queue — сколько мемов в очереди\n"
             "/fetch — проверить каналы прямо сейчас\n"
-            "/post — опубликовать мем вручную"
+            "/post — опубликовать мем вручную\n\n"
+            f"Твой Telegram ID: `{chat_id}`",
+            parse_mode="Markdown"
         )
 
     async def cmd_queue(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
