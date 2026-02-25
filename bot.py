@@ -239,6 +239,13 @@ def db_queue_size() -> int:
     with sqlite3.connect(DB) as db:
         return db.execute("SELECT COUNT(*) FROM posts WHERE status='approved'").fetchone()[0]
 
+def db_get_new_posts() -> list:
+    """Посты которые в базе но ещё не просмотрены."""
+    with sqlite3.connect(DB) as db:
+        return db.execute(
+            "SELECT id, channel, img_url, caption FROM posts WHERE status='new' ORDER BY added_at ASC LIMIT 30"
+        ).fetchall()
+
 # ─────────────────────────────────────────────────────────────────────
 #  РАСПИСАНИЕ
 # ─────────────────────────────────────────────────────────────────────
@@ -304,7 +311,38 @@ class MemeBot:
         """Вручную запустить проверку каналов прямо сейчас."""
         await update.message.reply_text("Проверяю каналы, подожди...")
         await self.fetch_and_notify()
-        await update.message.reply_text(f"Готово! В очереди на одобрение: смотри выше ☝️")
+        # Также показать посты которые уже в базе но ещё не просмотрены
+        await self.resend_pending()
+        n = db_queue_size()
+        await update.message.reply_text(f"Готово! В очереди одобрено: {n}")
+
+    async def resend_pending(self):
+        """Показать посты которые уже в базе но ещё не просмотрены."""
+        admin_id = db_get("admin_chat_id")
+        if not admin_id:
+            return
+        rows = db_get_new_posts()
+        for post_id, channel, img_url, caption in rows:
+            img = download_image(img_url)
+            if not img:
+                continue
+            try:
+                label = f"📌 @{channel}"
+                text  = f"{caption}\n\n{label}" if caption else label
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅", callback_data=f"approve:{post_id}"),
+                    InlineKeyboardButton("✍️", callback_data=f"caption:{post_id}"),
+                    InlineKeyboardButton("❌", callback_data=f"skip:{post_id}"),
+                ]])
+                await self.app.bot.send_photo(
+                    chat_id=admin_id,
+                    photo=BytesIO(img),
+                    caption=text,
+                    reply_markup=keyboard,
+                )
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logging.error(f"resend_pending: {e}")
 
     async def cmd_post(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Вручную опубликовать следующий мем из очереди."""
