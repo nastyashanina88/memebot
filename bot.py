@@ -262,11 +262,12 @@ class MemeBot:
         self.pending_caption  = None  # post_id ожидающий подписи
         init_db()
 
-        self.app.add_handler(CommandHandler("start", self.cmd_start))
-        self.app.add_handler(CommandHandler("queue", self.cmd_queue))
-        self.app.add_handler(CommandHandler("post", self.cmd_post))
-        self.app.add_handler(CommandHandler("fetch", self.cmd_fetch))
-        self.app.add_handler(CommandHandler("skip", self.cmd_skip_caption))
+        self.app.add_handler(CommandHandler("start",  self.cmd_start))
+        self.app.add_handler(CommandHandler("queue",  self.cmd_queue))
+        self.app.add_handler(CommandHandler("post",   self.cmd_post))
+        self.app.add_handler(CommandHandler("fetch",  self.cmd_fetch))
+        self.app.add_handler(CommandHandler("skip",   self.cmd_skip_caption))
+        self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CallbackQueryHandler(self.on_button))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
@@ -277,9 +278,12 @@ class MemeBot:
         db_set("admin_chat_id", chat_id)
         await update.message.reply_text(
             "Привет! Я буду присылать сюда мемы для одобрения.\n\n"
-            "✅ — добавить в очередь публикации\n"
+            "✅ — одобрить (без подписи)\n"
+            "✍️ — одобрить с подписью\n"
             "❌ — пропустить\n\n"
-            "/queue — сколько мемов в очереди"
+            "/queue — сколько мемов в очереди\n"
+            "/fetch — проверить каналы прямо сейчас\n"
+            "/post — опубликовать мем вручную"
         )
 
     async def cmd_queue(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -305,6 +309,21 @@ class MemeBot:
         await self.post_next()
         await update.message.reply_text(f"Готово! Осталось в очереди: {db_queue_size()}")
 
+    async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Показать статистику по базе данных."""
+        with sqlite3.connect(DB) as db:
+            new_cnt      = db.execute("SELECT COUNT(*) FROM posts WHERE status='new'").fetchone()[0]
+            approved_cnt = db.execute("SELECT COUNT(*) FROM posts WHERE status='approved'").fetchone()[0]
+            skipped_cnt  = db.execute("SELECT COUNT(*) FROM posts WHERE status='skipped'").fetchone()[0]
+            posted_cnt   = db.execute("SELECT COUNT(*) FROM posts WHERE status='posted'").fetchone()[0]
+        await update.message.reply_text(
+            f"📊 Статистика:\n"
+            f"🆕 Новых (не просмотрено): {new_cnt}\n"
+            f"✅ В очереди (одобрено): {approved_cnt}\n"
+            f"❌ Пропущено: {skipped_cnt}\n"
+            f"📤 Опубликовано: {posted_cnt}"
+        )
+
     # ── Кнопки одобрения ─────────────────────────────────────────────
 
     async def on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -318,14 +337,26 @@ class MemeBot:
         post_id = int(post_id)
 
         if action == "approve":
-            self.pending_caption = post_id
+            # Сразу одобряем без подписи
+            db_update(post_id, "approved")
             await query.edit_message_reply_markup(
                 InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✏️ Введи подпись или /skip", callback_data="noop")
+                    InlineKeyboardButton("✅ Одобрен", callback_data="noop")
                 ]])
             )
             await query.message.reply_text(
-                "Напиши подпись для этого мема или /skip чтобы без подписи:"
+                f"✅ Добавлено в очередь! В очереди: {db_queue_size()}"
+            )
+        elif action == "caption":
+            # Одобряем с подписью — ждём текст
+            self.pending_caption = post_id
+            await query.edit_message_reply_markup(
+                InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✏️ Жду подпись...", callback_data="noop")
+                ]])
+            )
+            await query.message.reply_text(
+                "Напиши подпись для мема (или /skip чтобы без подписи):"
             )
         elif action == "skip":
             db_update(post_id, "skipped")
@@ -336,18 +367,19 @@ class MemeBot:
             )
 
     async def on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Получаем подпись от пользователя после одобрения мема."""
+        """Получаем подпись от пользователя после одобрения мема с подписью."""
         if self.pending_caption is None:
             return
         caption = update.message.text.strip()
         db_update_caption(self.pending_caption, caption)
         db_update(self.pending_caption, "approved")
         self.pending_caption = None
-        await update.message.reply_text(f"✅ Добавлено в очередь с подписью:\n_{caption}_", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Добавлено в очередь с подписью:\n_{caption}_\n\nВ очереди: {db_queue_size()}", parse_mode="Markdown")
 
     async def cmd_skip_caption(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Одобрить мем без подписи."""
+        """Одобрить мем без подписи (во время ввода подписи)."""
         if self.pending_caption is None:
+            await update.message.reply_text("Нет мема ожидающего подпись.")
             return
         db_update(self.pending_caption, "approved")
         self.pending_caption = None
@@ -385,6 +417,7 @@ class MemeBot:
 
                     keyboard = InlineKeyboardMarkup([[
                         InlineKeyboardButton("✅", callback_data=f"approve:{post_id}"),
+                        InlineKeyboardButton("✍️", callback_data=f"caption:{post_id}"),
                         InlineKeyboardButton("❌", callback_data=f"skip:{post_id}"),
                     ]])
 
