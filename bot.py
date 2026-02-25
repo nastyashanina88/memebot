@@ -346,6 +346,7 @@ class MemeBot:
                     caption=text,
                     reply_markup=keyboard,
                 )
+                db_update(post_id, "sent")  # помечаем что уже показали
                 await asyncio.sleep(0.5)
             except Exception as e:
                 logging.error(f"resend_pending: {e}")
@@ -477,6 +478,7 @@ class MemeBot:
                         caption=text,
                         reply_markup=keyboard,
                     )
+                    db_update(post_id, "sent")  # помечаем что уже показали
                     sent += 1
                     await asyncio.sleep(0.5)
 
