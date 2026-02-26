@@ -9,6 +9,7 @@ import os
 import random
 import re
 import sqlite3
+import sys
 from datetime import datetime, timedelta
 from io import BytesIO
 from typing import Optional
@@ -357,8 +358,11 @@ class MemeBot:
             await update.message.reply_text("Очередь пуста — одобри мемы кнопкой ✅")
             return
         await update.message.reply_text("Публикую...")
-        await self.post_next()
-        await update.message.reply_text(f"Готово! Осталось в очереди: {db_queue_size()}")
+        ok, err = await self.post_next()
+        if ok:
+            await update.message.reply_text(f"Готово! Осталось в очереди: {db_queue_size()}")
+        else:
+            await update.message.reply_text(f"❌ Ошибка публикации: {err}")
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Показать статистику по базе данных."""
@@ -494,14 +498,14 @@ class MemeBot:
         row = db_get_approved()
         if not row:
             logging.warning("Очередь пуста, пропускаю слот")
-            return
+            return True, None
 
         post_id, img_url, caption = row
 
         img = download_image(img_url)
         if not img:
             db_update(post_id, "error")
-            return
+            return False, "не удалось скачать картинку"
 
         try:
             await self.app.bot.send_photo(
@@ -511,8 +515,10 @@ class MemeBot:
             )
             db_update(post_id, "posted")
             logging.info("Мем опубликован в канале")
+            return True, None
         except Exception as e:
             logging.error(f"Ошибка публикации: {e}")
+            return False, str(e)
 
     # ── Главный цикл ─────────────────────────────────────────────────
 
@@ -540,17 +546,27 @@ class MemeBot:
 
             if self.schedule and now >= self.schedule[0]:
                 self.schedule.pop(0)
-                await self.post_next()
+                ok, err = await self.post_next()
+                if not ok and err:
+                    logging.error(f"Плановая публикация не удалась: {err}")
 
             await asyncio.sleep(30)
 
     async def run(self):
+        from telegram.error import Conflict
         await self.app.initialize()
         await self.app.start()
-        await self.app.updater.start_polling()
+        try:
+            await self.app.updater.start_polling(drop_pending_updates=True)
+        except Conflict as e:
+            logging.critical(f"Конфликт: уже запущен другой экземпляр бота. Выхожу. ({e})")
+            sys.exit(1)
         logging.info("Бот запущен!")
         try:
             await self.main_loop()
+        except Conflict as e:
+            logging.critical(f"Конфликт во время работы: {e}. Выхожу.")
+            sys.exit(1)
         finally:
             logging.info("Завершение...")
             await self.app.updater.stop()
