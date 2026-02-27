@@ -338,6 +338,7 @@ class MemeBot:
                 text  = f"{caption}\n\n{label}" if caption else label
                 keyboard = InlineKeyboardMarkup([[
                     InlineKeyboardButton("✅", callback_data=f"approve:{post_id}"),
+                    InlineKeyboardButton("🚀", callback_data=f"now:{post_id}"),
                     InlineKeyboardButton("✍️", callback_data=f"caption:{post_id}"),
                     InlineKeyboardButton("❌", callback_data=f"skip:{post_id}"),
                 ]])
@@ -413,6 +414,22 @@ class MemeBot:
             await query.message.reply_text(
                 "Напиши подпись для мема (или /skip чтобы без подписи):"
             )
+        elif action == "now":
+            db_update(post_id, "approved")
+            await query.edit_message_reply_markup(
+                InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🚀 Публикую...", callback_data="noop")
+                ]])
+            )
+            ok, err = await self.post_next()
+            if ok:
+                await query.edit_message_reply_markup(
+                    InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🚀 Опубликован!", callback_data="noop")
+                    ]])
+                )
+            else:
+                await query.message.reply_text(f"❌ Ошибка публикации: {err}")
         elif action == "skip":
             db_update(post_id, "skipped")
             await query.edit_message_reply_markup(
@@ -472,6 +489,7 @@ class MemeBot:
 
                     keyboard = InlineKeyboardMarkup([[
                         InlineKeyboardButton("✅", callback_data=f"approve:{post_id}"),
+                        InlineKeyboardButton("🚀", callback_data=f"now:{post_id}"),
                         InlineKeyboardButton("✍️", callback_data=f"caption:{post_id}"),
                         InlineKeyboardButton("❌", callback_data=f"skip:{post_id}"),
                     ]])
