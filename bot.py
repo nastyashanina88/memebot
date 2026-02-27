@@ -175,7 +175,7 @@ def download_image(url: str) -> Optional[bytes]:
 #  БАЗА ДАННЫХ
 # ─────────────────────────────────────────────────────────────────────
 
-DB = os.path.join(os.getenv("DATA_DIR", "."), "memes.db")
+DB = os.path.join(os.getenv("DATA_DIR", "/data"), "memes.db")
 
 def init_db():
     with sqlite3.connect(DB) as db:
