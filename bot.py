@@ -44,6 +44,8 @@ SOURCE_CHANNELS = [
     "vsratyikontent",
     "thresomewhitout",
     "impirat",
+    "pleasedickann",
+    "monologue3",
 ]
 
 POSTS_PER_DAY_MIN = 7
