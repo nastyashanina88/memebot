@@ -46,6 +46,14 @@ SOURCE_CHANNELS = [
     "impirat",
     "pleasedickann",
     "monologue3",
+    "dobriememes",
+    "russkiememy",
+    "female_memes",
+    "drugzahodi",
+    "axaxanakanecta",
+    "cats_mems",
+    "memesfs",
+    "grustnie_memi",
 ]
 
 POSTS_PER_DAY_MIN = 7
