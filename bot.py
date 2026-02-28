@@ -356,6 +356,7 @@ class MemeBot:
         self.app.add_handler(CommandHandler("skip",       self.cmd_skip_caption))
         self.app.add_handler(CommandHandler("status",     self.cmd_status))
         self.app.add_handler(CommandHandler("clearqueue", self.cmd_clearqueue))
+        self.app.add_handler(CommandHandler("clearsent",  self.cmd_clearsent))
         self.app.add_handler(CallbackQueryHandler(self.on_button))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
@@ -454,6 +455,16 @@ class MemeBot:
             f"В очереди осталось: {db_queue_size()}\n\n"
             f"Теперь напиши /fetch — одобри новые мемы и они запостятся."
         )
+
+    async def cmd_clearsent(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Сбросить все посты которые уже показаны или ещё не показаны — чистый лист."""
+        with sqlite3.connect(DB) as db:
+            n = db.execute(
+                "SELECT COUNT(*) FROM posts WHERE status IN ('new', 'sent')"
+            ).fetchone()[0]
+            db.execute("UPDATE posts SET status='skipped' WHERE status IN ('new', 'sent')")
+            db.commit()
+        await update.message.reply_text(f"Сброшено {n} постов. Бот больше их не пришлёт.\nНапиши /fetch чтобы загрузить свежие.")
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Показать статистику по базе данных."""
