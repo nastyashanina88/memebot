@@ -265,10 +265,12 @@ def db_save_post(channel, msg_id, img_url, caption, img_data: Optional[bytes] = 
         logging.error(f"db_save_post: {e}")
     return None
 
-def db_update(post_id: int, status: str):
+def db_update(post_id: int, status: str) -> bool:
+    """Возвращает True если строка реально обновилась."""
     with sqlite3.connect(DB) as db:
-        db.execute("UPDATE posts SET status=? WHERE id=?", (status, post_id))
+        cur = db.execute("UPDATE posts SET status=? WHERE id=?", (status, post_id))
         db.commit()
+        return cur.rowcount > 0
 
 def db_update_caption(post_id: int, caption: str):
     with sqlite3.connect(DB) as db:
@@ -494,8 +496,13 @@ class MemeBot:
         post_id = int(post_id)
 
         if action == "approve":
-            db_update(post_id, "approved")
-            ensure_img_data(post_id)  # сохраняем байты пока URL свежий
+            updated = db_update(post_id, "approved")
+            if not updated:
+                await query.message.reply_text(
+                    "⚠️ Этот мем из старой сессии — база обновилась. Напиши /fetch чтобы получить свежие."
+                )
+                return
+            ensure_img_data(post_id)
             await query.edit_message_reply_markup(
                 InlineKeyboardMarkup([[
                     InlineKeyboardButton("✅ Одобрен", callback_data="noop")
@@ -517,8 +524,13 @@ class MemeBot:
                 "Напиши подпись для мема (или /skip чтобы без подписи):"
             )
         elif action == "now":
-            db_update(post_id, "approved")
-            ensure_img_data(post_id)  # сохраняем байты пока URL свежий
+            updated = db_update(post_id, "approved")
+            if not updated:
+                await query.message.reply_text(
+                    "⚠️ Этот мем из старой сессии — база обновилась. Напиши /fetch чтобы получить свежие."
+                )
+                return
+            ensure_img_data(post_id)
             await query.edit_message_reply_markup(
                 InlineKeyboardMarkup([[
                     InlineKeyboardButton("🚀 Публикую...", callback_data="noop")
