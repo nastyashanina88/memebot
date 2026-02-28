@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 # ─────────────────────────────────────────────────────────────────────
 #  НАСТРОЙКИ
@@ -171,11 +171,35 @@ def download_image(url: str) -> Optional[bytes]:
         logging.error(f"Ошибка скачивания изображения: {e}")
         return None
 
+def refetch_image(channel: str, msg_id: str) -> Optional[bytes]:
+    """Заново достаёт свежий CDN-URL поста и скачивает картинку."""
+    try:
+        url = f"https://t.me/s/{channel}?before={int(msg_id) + 1}"
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return None
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for msg in soup.find_all("div", class_="tgme_widget_message"):
+            data_post = msg.get("data-post", "")
+            if data_post != f"{channel}/{msg_id}":
+                continue
+            wrap = msg.find("a", class_="tgme_widget_message_photo_wrap")
+            if wrap:
+                m = re.search(r"url\('(.+?)'\)", wrap.get("style", ""))
+                if m:
+                    return download_image(m.group(1))
+        return None
+    except Exception as e:
+        logging.error(f"refetch_image {channel}/{msg_id}: {e}")
+        return None
+
 # ─────────────────────────────────────────────────────────────────────
 #  БАЗА ДАННЫХ
 # ─────────────────────────────────────────────────────────────────────
 
-DB = os.path.join(os.getenv("DATA_DIR", "/data"), "memes.db")
+_default_db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+os.makedirs(_default_db_dir, exist_ok=True)
+DB = os.path.join(os.getenv("DATA_DIR", _default_db_dir), "memes.db")
 
 def init_db():
     with sqlite3.connect(DB) as db:
@@ -193,9 +217,17 @@ def init_db():
                 UNIQUE(channel, msg_id)
             )
         """)
-        # Добавляем колонку если её ещё нет (для старых БД)
+        # Добавляем колонки если их ещё нет (для старых БД)
         try:
             db.execute("ALTER TABLE posts ADD COLUMN user_caption TEXT")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE posts ADD COLUMN img_data BLOB")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE posts ADD COLUMN file_id TEXT")
         except Exception:
             pass
         db.execute("""
@@ -219,12 +251,12 @@ def db_set(key: str, value: str):
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value))
         db.commit()
 
-def db_save_post(channel, msg_id, img_url, caption) -> Optional[int]:
+def db_save_post(channel, msg_id, img_url, caption, img_data: Optional[bytes] = None) -> Optional[int]:
     try:
         with sqlite3.connect(DB) as db:
             cur = db.execute(
-                "INSERT OR IGNORE INTO posts (channel, msg_id, img_url, caption) VALUES (?,?,?,?)",
-                (channel, msg_id, img_url, caption),
+                "INSERT OR IGNORE INTO posts (channel, msg_id, img_url, caption, img_data) VALUES (?,?,?,?,?)",
+                (channel, msg_id, img_url, caption, img_data),
             )
             db.commit()
             if cur.lastrowid:
@@ -243,10 +275,37 @@ def db_update_caption(post_id: int, caption: str):
         db.execute("UPDATE posts SET user_caption=? WHERE id=?", (caption, post_id))
         db.commit()
 
+def db_save_img_data(post_id: int, img_data: bytes):
+    with sqlite3.connect(DB) as db:
+        db.execute("UPDATE posts SET img_data=? WHERE id=?", (img_data, post_id))
+        db.commit()
+
+def db_save_file_id(post_id: int, file_id: str):
+    with sqlite3.connect(DB) as db:
+        db.execute("UPDATE posts SET file_id=? WHERE id=?", (file_id, post_id))
+        db.commit()
+
+def ensure_img_data(post_id: int):
+    """Гарантирует что байты картинки сохранены — вызывать при одобрении поста."""
+    with sqlite3.connect(DB) as db:
+        row = db.execute(
+            "SELECT channel, msg_id, img_url, img_data FROM posts WHERE id=?", (post_id,)
+        ).fetchone()
+    if not row:
+        return
+    channel, msg_id, img_url, img_data = row
+    if img_data:
+        return  # уже есть
+    img = download_image(img_url) or refetch_image(channel, msg_id)
+    if img:
+        db_save_img_data(post_id, img)
+        logging.info(f"Пост {post_id}: байты картинки сохранены при одобрении")
+
 def db_get_approved() -> Optional[tuple]:
     with sqlite3.connect(DB) as db:
         return db.execute(
-            "SELECT id, img_url, user_caption FROM posts WHERE status='approved' ORDER BY added_at ASC LIMIT 1"
+            "SELECT id, channel, msg_id, img_url, user_caption, img_data, file_id "
+            "FROM posts WHERE status='approved' ORDER BY added_at ASC LIMIT 1"
         ).fetchone()
 
 
@@ -290,12 +349,13 @@ class MemeBot:
         self.pending_caption  = None  # post_id ожидающий подписи
         init_db()
 
-        self.app.add_handler(CommandHandler("start",  self.cmd_start))
-        self.app.add_handler(CommandHandler("queue",  self.cmd_queue))
-        self.app.add_handler(CommandHandler("post",   self.cmd_post))
-        self.app.add_handler(CommandHandler("fetch",  self.cmd_fetch))
-        self.app.add_handler(CommandHandler("skip",   self.cmd_skip_caption))
-        self.app.add_handler(CommandHandler("status", self.cmd_status))
+        self.app.add_handler(CommandHandler("start",      self.cmd_start))
+        self.app.add_handler(CommandHandler("queue",      self.cmd_queue))
+        self.app.add_handler(CommandHandler("post",       self.cmd_post))
+        self.app.add_handler(CommandHandler("fetch",      self.cmd_fetch))
+        self.app.add_handler(CommandHandler("skip",       self.cmd_skip_caption))
+        self.app.add_handler(CommandHandler("status",     self.cmd_status))
+        self.app.add_handler(CommandHandler("clearqueue", self.cmd_clearqueue))
         self.app.add_handler(CallbackQueryHandler(self.on_button))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
@@ -342,6 +402,7 @@ class MemeBot:
         for post_id, channel, img_url, caption in rows:
             img = download_image(img_url)
             if not img:
+                db_update(post_id, "error")
                 continue
             try:
                 label = f"📌 @{channel}"
@@ -352,13 +413,16 @@ class MemeBot:
                     InlineKeyboardButton("✍️", callback_data=f"caption:{post_id}"),
                     InlineKeyboardButton("❌", callback_data=f"skip:{post_id}"),
                 ]])
-                await self.app.bot.send_photo(
+                sent_msg = await self.app.bot.send_photo(
                     chat_id=admin_id,
                     photo=BytesIO(img),
                     caption=text,
                     reply_markup=keyboard,
                 )
-                db_update(post_id, "sent")  # помечаем что уже показали
+                fid = sent_msg.photo[-1].file_id
+                db_save_file_id(post_id, fid)
+                db_save_img_data(post_id, img)
+                db_update(post_id, "sent")
                 await asyncio.sleep(0.5)
             except Exception as e:
                 logging.error(f"resend_pending: {e}")
@@ -374,6 +438,22 @@ class MemeBot:
             await update.message.reply_text(f"Готово! Осталось в очереди: {db_queue_size()}")
         else:
             await update.message.reply_text(f"❌ Ошибка публикации: {err}")
+
+    async def cmd_clearqueue(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Сбросить все одобренные посты без file_id (битые)."""
+        with sqlite3.connect(DB) as db:
+            n = db.execute(
+                "SELECT COUNT(*) FROM posts WHERE status='approved' AND file_id IS NULL"
+            ).fetchone()[0]
+            db.execute(
+                "UPDATE posts SET status='skipped' WHERE status='approved' AND file_id IS NULL"
+            )
+            db.commit()
+        await update.message.reply_text(
+            f"Убрано битых постов: {n}\n"
+            f"В очереди осталось: {db_queue_size()}\n\n"
+            f"Теперь напиши /fetch — одобри новые мемы и они запостятся."
+        )
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Показать статистику по базе данных."""
@@ -403,8 +483,8 @@ class MemeBot:
         post_id = int(post_id)
 
         if action == "approve":
-            # Сразу одобряем без подписи
             db_update(post_id, "approved")
+            ensure_img_data(post_id)  # сохраняем байты пока URL свежий
             await query.edit_message_reply_markup(
                 InlineKeyboardMarkup([[
                     InlineKeyboardButton("✅ Одобрен", callback_data="noop")
@@ -414,8 +494,9 @@ class MemeBot:
                 f"✅ Добавлено в очередь! В очереди: {db_queue_size()}"
             )
         elif action == "caption":
-            # Одобряем с подписью — ждём текст
+            # Одобряем с подписью — ждём текст; байты сохраним когда придёт подпись
             self.pending_caption = post_id
+            ensure_img_data(post_id)  # сохраняем байты пока URL свежий
             await query.edit_message_reply_markup(
                 InlineKeyboardMarkup([[
                     InlineKeyboardButton("✏️ Жду подпись...", callback_data="noop")
@@ -426,6 +507,7 @@ class MemeBot:
             )
         elif action == "now":
             db_update(post_id, "approved")
+            ensure_img_data(post_id)  # сохраняем байты пока URL свежий
             await query.edit_message_reply_markup(
                 InlineKeyboardMarkup([[
                     InlineKeyboardButton("🚀 Публикую...", callback_data="noop")
@@ -455,6 +537,7 @@ class MemeBot:
         caption = update.message.text.strip()
         db_update_caption(self.pending_caption, caption)
         db_update(self.pending_caption, "approved")
+        ensure_img_data(self.pending_caption)
         self.pending_caption = None
         await update.message.reply_text(f"✅ Добавлено в очередь с подписью:\n_{caption}_\n\nВ очереди: {db_queue_size()}", parse_mode="Markdown")
 
@@ -464,6 +547,7 @@ class MemeBot:
             await update.message.reply_text("Нет мема ожидающего подпись.")
             return
         db_update(self.pending_caption, "approved")
+        ensure_img_data(self.pending_caption)
         self.pending_caption = None
         await update.message.reply_text(f"✅ Добавлено в очередь без подписи. В очереди: {db_queue_size()}")
 
@@ -481,16 +565,25 @@ class MemeBot:
         for channel in SOURCE_CHANNELS:
             posts = fetch_channel(channel)
             for post in posts:
-                post_id = db_save_post(
-                    post["channel"], post["msg_id"],
-                    post["img_url"],  post["caption"],
-                )
-                if not post_id:
-                    continue  # уже видели
-
                 img = download_image(post["img_url"])
                 if not img:
                     continue
+
+                post_id = db_save_post(
+                    post["channel"], post["msg_id"],
+                    post["img_url"],  post["caption"], img,
+                )
+                if not post_id:
+                    # Пост уже в базе — обновляем img_data если его нет
+                    with sqlite3.connect(DB) as _db:
+                        row = _db.execute(
+                            "SELECT id FROM posts WHERE channel=? AND msg_id=? AND img_data IS NULL",
+                            (post["channel"], post["msg_id"])
+                        ).fetchone()
+                        if row:
+                            _db.execute("UPDATE posts SET img_data=? WHERE id=?", (img, row[0]))
+                            _db.commit()
+                    continue  # уже видели, не показываем снова
 
                 try:
                     caption = post["caption"]
@@ -504,13 +597,16 @@ class MemeBot:
                         InlineKeyboardButton("❌", callback_data=f"skip:{post_id}"),
                     ]])
 
-                    await self.app.bot.send_photo(
+                    sent_msg = await self.app.bot.send_photo(
                         chat_id=admin_id,
                         photo=BytesIO(img),
                         caption=text,
                         reply_markup=keyboard,
                     )
-                    db_update(post_id, "sent")  # помечаем что уже показали
+                    # Сохраняем file_id — он постоянный, не истекает
+                    fid = sent_msg.photo[-1].file_id
+                    db_save_file_id(post_id, fid)
+                    db_update(post_id, "sent")
                     sent += 1
                     await asyncio.sleep(0.5)
 
@@ -523,30 +619,47 @@ class MemeBot:
     # ── Публикация в канал ───────────────────────────────────────────
 
     async def post_next(self):
-        row = db_get_approved()
-        if not row:
+        # Берём сразу все одобренные посты и перебираем
+        with sqlite3.connect(DB) as _db:
+            rows = _db.execute(
+                "SELECT id, channel, msg_id, img_url, user_caption, img_data, file_id FROM posts "
+                "WHERE status='approved' ORDER BY added_at ASC"
+            ).fetchall()
+
+        if not rows:
             logging.warning("Очередь пуста, пропускаю слот")
             return True, None
 
-        post_id, img_url, caption = row
+        for post_id, channel, msg_id, img_url, caption, img_data, file_id in rows:
+            # file_id — постоянный, не истекает никогда; img_data — байты; остальное — запасные варианты
+            if file_id:
+                photo = file_id
+            elif img_data:
+                photo = BytesIO(img_data)
+            else:
+                raw = download_image(img_url) or refetch_image(channel, msg_id)
+                if not raw:
+                    logging.warning(f"Пост {post_id}: картинка недоступна, пропускаю")
+                    db_update(post_id, "skipped")
+                    continue
+                photo = BytesIO(raw)
 
-        img = download_image(img_url)
-        if not img:
-            db_update(post_id, "error")
-            return False, "не удалось скачать картинку"
+            try:
+                await self.app.bot.send_photo(
+                    chat_id=MY_CHANNEL,
+                    photo=photo,
+                    caption=caption if caption else None,
+                )
+                db_update(post_id, "posted")
+                logging.info("Мем опубликован в канале")
+                return True, None
+            except Exception as e:
+                logging.error(f"Ошибка публикации: {e}")
+                return False, str(e)
 
-        try:
-            await self.app.bot.send_photo(
-                chat_id=MY_CHANNEL,
-                photo=BytesIO(img),
-                caption=caption if caption else None,
-            )
-            db_update(post_id, "posted")
-            logging.info("Мем опубликован в канале")
-            return True, None
-        except Exception as e:
-            logging.error(f"Ошибка публикации: {e}")
-            return False, str(e)
+        # Все посты оказались битые — очередь очищена, не ошибка
+        logging.warning("Все одобренные посты были битые, очередь очищена")
+        return True, None
 
     # ── Главный цикл ─────────────────────────────────────────────────
 
@@ -589,7 +702,7 @@ class MemeBot:
         except Conflict as e:
             logging.critical(f"Конфликт: уже запущен другой экземпляр бота. Выхожу. ({e})")
             sys.exit(1)
-        logging.info("Бот запущен!")
+        logging.info(f"Бот запущен! MY_CHANNEL={MY_CHANNEL!r}  BOT_TOKEN={'OK' if BOT_TOKEN else 'ПУСТОЙ'}  DB={DB}")
         try:
             await self.main_loop()
         except Conflict as e:
