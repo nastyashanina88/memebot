@@ -54,6 +54,9 @@ SOURCE_CHANNELS = [
     "cats_mems",
     "memesfs",
     "grustnie_memi",
+    "tasamaDama",
+    "plohoy_vladlen",
+    "sammychoret",
 ]
 
 POSTS_PER_DAY_MIN = 7
