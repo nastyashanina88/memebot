@@ -651,6 +651,10 @@ class MemeBot:
                     caption=caption if caption else None,
                 )
                 db_update(post_id, "posted")
+                # Байты больше не нужны — освобождаем место в базе
+                with sqlite3.connect(DB) as _db:
+                    _db.execute("UPDATE posts SET img_data=NULL WHERE id=?", (post_id,))
+                    _db.commit()
                 logging.info("Мем опубликован в канале")
                 return True, None
             except Exception as e:
@@ -681,6 +685,15 @@ class MemeBot:
                 self.schedule    = make_schedule()
                 logging.info("Новый день! Расписание: "
                              + ", ".join(t.strftime("%H:%M") for t in self.schedule))
+                # Чистим старые записи раз в день
+                with sqlite3.connect(DB) as _db:
+                    deleted = _db.execute(
+                        "DELETE FROM posts WHERE status IN ('posted','skipped','error') "
+                        "AND added_at < datetime('now', '-30 days')"
+                    ).rowcount
+                    _db.commit()
+                if deleted:
+                    logging.info(f"Очистка базы: удалено {deleted} старых записей")
 
             if self.last_fetch is None or (now - self.last_fetch).total_seconds() >= FETCH_INTERVAL:
                 await self.fetch_and_notify()
@@ -721,4 +734,15 @@ if __name__ == "__main__":
         format="%(asctime)s  %(levelname)s  %(message)s",
         datefmt="%H:%M:%S",
     )
+
+    errors = []
+    if not BOT_TOKEN:
+        errors.append("BOT_TOKEN не задан в .env")
+    if not MY_CHANNEL:
+        errors.append("MY_CHANNEL не задан в .env")
+    if errors:
+        for e in errors:
+            logging.critical(f"Ошибка конфига: {e}")
+        sys.exit(1)
+
     asyncio.run(MemeBot().run())
