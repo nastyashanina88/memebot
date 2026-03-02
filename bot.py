@@ -560,8 +560,8 @@ class MemeBot:
         if action == "approve":
             updated = db_update(post_id, "approved")
             if not updated:
-                await query.message.reply_text(
-                    "⚠️ Этот мем из старой сессии — база обновилась. Напиши /fetch чтобы получить свежие."
+                await query.edit_message_reply_markup(
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Устарел", callback_data="noop")]])
                 )
                 return
             await ensure_img_data(self.session, post_id)
@@ -588,8 +588,8 @@ class MemeBot:
         elif action == "now":
             updated = db_update(post_id, "approved")
             if not updated:
-                await query.message.reply_text(
-                    "⚠️ Этот мем из старой сессии — база обновилась. Напиши /fetch чтобы получить свежие."
+                await query.edit_message_reply_markup(
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Устарел", callback_data="noop")]])
                 )
                 return
             await ensure_img_data(self.session, post_id)
