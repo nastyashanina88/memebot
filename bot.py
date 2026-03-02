@@ -14,8 +14,8 @@ from datetime import datetime, timedelta
 from io import BytesIO
 from typing import Optional
 
+import aiohttp
 import pytz
-import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -66,6 +66,7 @@ POST_END_HOUR     = 22
 MAX_CAPTION_LEN   = 150
 FETCH_INTERVAL    = 3600  # секунды между проверками каналов
 FETCH_HOURS_BACK  = 72    # брать посты за последние N часов
+MAX_SEND_PER_FETCH = 25   # максимум мемов на одобрение за один /fetch
 
 # ─────────────────────────────────────────────────────────────────────
 #  КОНФИГ
@@ -109,79 +110,86 @@ def is_good_post(caption: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+_FETCH_SEMAPHORE = asyncio.Semaphore(8)  # максимум 8 одновременных запросов к t.me
 
-def fetch_channel(channel: str, hours_back: int = FETCH_HOURS_BACK) -> list:
-    try:
-        resp = requests.get(f"https://t.me/s/{channel}", headers=HEADERS, timeout=10)
-        if resp.status_code != 200:
+async def fetch_channel(session: aiohttp.ClientSession, channel: str, hours_back: int = FETCH_HOURS_BACK) -> list:
+    async with _FETCH_SEMAPHORE:
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with session.get(f"https://t.me/s/{channel}", timeout=timeout) as resp:
+                if resp.status != 200:
+                    return []
+                html = await resp.text()
+
+            soup   = BeautifulSoup(html, "html.parser")
+            posts  = []
+            cutoff = datetime.now(pytz.utc) - timedelta(hours=hours_back)
+
+            for msg in soup.find_all("div", class_="tgme_widget_message"):
+                data_post = msg.get("data-post", "")
+                msg_id    = data_post.split("/")[-1] if "/" in data_post else ""
+                if not msg_id:
+                    continue
+
+                # Фильтр по времени
+                time_el = msg.find("time")
+                if time_el and time_el.get("datetime"):
+                    from datetime import timezone
+                    try:
+                        post_time = datetime.fromisoformat(time_el["datetime"])
+                        if post_time.tzinfo is None:
+                            post_time = post_time.replace(tzinfo=timezone.utc)
+                        if post_time < cutoff:
+                            continue
+                    except Exception:
+                        pass
+
+                # Ищем картинку
+                img_url = None
+                wrap    = msg.find("a", class_="tgme_widget_message_photo_wrap")
+                if wrap:
+                    m = re.search(r"url\('(.+?)'\)", wrap.get("style", ""))
+                    if m:
+                        img_url = m.group(1)
+
+                if not img_url:
+                    continue
+
+                # Подпись
+                text_el = msg.find("div", class_="tgme_widget_message_text")
+                caption = text_el.get_text(separator=" ").strip() if text_el else ""
+
+                if not is_good_post(caption):
+                    continue
+
+                posts.append({"channel": channel, "msg_id": msg_id,
+                              "img_url": img_url, "caption": caption})
+
+            return posts
+
+        except Exception as e:
+            logging.error(f"Ошибка парсинга {channel}: {e}")
             return []
 
-        soup     = BeautifulSoup(resp.text, "html.parser")
-        posts    = []
-        cutoff   = datetime.now(pytz.utc) - timedelta(hours=hours_back)
-
-        for msg in soup.find_all("div", class_="tgme_widget_message"):
-            data_post = msg.get("data-post", "")
-            msg_id    = data_post.split("/")[-1] if "/" in data_post else ""
-            if not msg_id:
-                continue
-
-            # Фильтр по времени
-            time_el = msg.find("time")
-            if time_el and time_el.get("datetime"):
-                from datetime import timezone
-                try:
-                    post_time = datetime.fromisoformat(time_el["datetime"])
-                    if post_time.tzinfo is None:
-                        post_time = post_time.replace(tzinfo=timezone.utc)
-                    if post_time < cutoff:
-                        continue
-                except Exception:
-                    pass
-
-            # Ищем картинку
-            img_url = None
-            wrap    = msg.find("a", class_="tgme_widget_message_photo_wrap")
-            if wrap:
-                m = re.search(r"url\('(.+?)'\)", wrap.get("style", ""))
-                if m:
-                    img_url = m.group(1)
-
-            if not img_url:
-                continue
-
-            # Подпись
-            text_el = msg.find("div", class_="tgme_widget_message_text")
-            caption = text_el.get_text(separator=" ").strip() if text_el else ""
-
-            if not is_good_post(caption):
-                continue
-
-            posts.append({"channel": channel, "msg_id": msg_id,
-                          "img_url": img_url, "caption": caption})
-
-        return posts
-
-    except Exception as e:
-        logging.error(f"Ошибка парсинга {channel}: {e}")
-        return []
-
-def download_image(url: str) -> Optional[bytes]:
+async def download_image(session: aiohttp.ClientSession, url: str) -> Optional[bytes]:
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        return r.content if r.status_code == 200 else None
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with session.get(url, timeout=timeout) as r:
+            return await r.read() if r.status == 200 else None
     except Exception as e:
         logging.error(f"Ошибка скачивания изображения: {e}")
         return None
 
-def refetch_image(channel: str, msg_id: str) -> Optional[bytes]:
+async def refetch_image(session: aiohttp.ClientSession, channel: str, msg_id: str) -> Optional[bytes]:
     """Заново достаёт свежий CDN-URL поста и скачивает картинку."""
     try:
         url = f"https://t.me/s/{channel}?before={int(msg_id) + 1}"
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        if resp.status_code != 200:
-            return None
-        soup = BeautifulSoup(resp.text, "html.parser")
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with session.get(url, timeout=timeout) as resp:
+            if resp.status != 200:
+                return None
+            html = await resp.text()
+        soup = BeautifulSoup(html, "html.parser")
         for msg in soup.find_all("div", class_="tgme_widget_message"):
             data_post = msg.get("data-post", "")
             if data_post != f"{channel}/{msg_id}":
@@ -190,7 +198,7 @@ def refetch_image(channel: str, msg_id: str) -> Optional[bytes]:
             if wrap:
                 m = re.search(r"url\('(.+?)'\)", wrap.get("style", ""))
                 if m:
-                    return download_image(m.group(1))
+                    return await download_image(session, m.group(1))
         return None
     except Exception as e:
         logging.error(f"refetch_image {channel}/{msg_id}: {e}")
@@ -290,7 +298,7 @@ def db_save_file_id(post_id: int, file_id: str):
         db.execute("UPDATE posts SET file_id=? WHERE id=?", (file_id, post_id))
         db.commit()
 
-def ensure_img_data(post_id: int):
+async def ensure_img_data(session: aiohttp.ClientSession, post_id: int):
     """Гарантирует что байты картинки сохранены — вызывать при одобрении поста."""
     with sqlite3.connect(DB) as db:
         row = db.execute(
@@ -301,7 +309,7 @@ def ensure_img_data(post_id: int):
     channel, msg_id, img_url, img_data = row
     if img_data:
         return  # уже есть
-    img = download_image(img_url) or refetch_image(channel, msg_id)
+    img = await download_image(session, img_url) or await refetch_image(session, channel, msg_id)
     if img:
         db_save_img_data(post_id, img)
         logging.info(f"Пост {post_id}: байты картинки сохранены при одобрении")
@@ -352,6 +360,8 @@ class MemeBot:
         self.last_fetch       = None
         self.current_day      = None
         self.pending_caption  = None  # post_id ожидающий подписи
+        self.session: Optional[aiohttp.ClientSession] = None
+        self._post_lock       = asyncio.Lock()
         init_db()
 
         self.app.add_handler(CommandHandler("start",      self.cmd_start))
@@ -360,6 +370,7 @@ class MemeBot:
         self.app.add_handler(CommandHandler("fetch",      self.cmd_fetch))
         self.app.add_handler(CommandHandler("skip",       self.cmd_skip_caption))
         self.app.add_handler(CommandHandler("status",     self.cmd_status))
+        self.app.add_handler(CommandHandler("schedule",   self.cmd_schedule))
         self.app.add_handler(CommandHandler("clearqueue", self.cmd_clearqueue))
         self.app.add_handler(CommandHandler("clearsent",  self.cmd_clearsent))
         self.app.add_handler(CallbackQueryHandler(self.on_button))
@@ -390,6 +401,30 @@ class MemeBot:
             f"Расписание на сегодня: {times}"
         )
 
+    async def cmd_schedule(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        now = datetime.now(MSK)
+        if not self.schedule:
+            await update.message.reply_text("На сегодня слоты закончились. Новое расписание — завтра в 09:00.")
+            return
+        lines = []
+        for t in self.schedule:
+            delta = t - now
+            mins  = int(delta.total_seconds() // 60)
+            if mins < 60:
+                until = f"через {mins} мин"
+            else:
+                until = f"через {mins // 60} ч {mins % 60} мин"
+            lines.append(f"  {t.strftime('%H:%M')} ({until})")
+        queue_n = db_queue_size()
+        text = (
+            f"Расписание на сегодня ({len(self.schedule)} слотов):\n"
+            + "\n".join(lines)
+            + f"\n\nВ очереди: {queue_n} мемов"
+        )
+        if queue_n < len(self.schedule):
+            text += f"\n⚠️ Мемов меньше чем слотов — одобри ещё {len(self.schedule) - queue_n}"
+        await update.message.reply_text(text)
+
     async def cmd_fetch(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Вручную запустить проверку каналов прямо сейчас."""
         await update.message.reply_text("Проверяю каналы, подожди...")
@@ -406,7 +441,7 @@ class MemeBot:
             return
         rows = db_get_new_posts()
         for post_id, channel, img_url, caption in rows:
-            img = download_image(img_url)
+            img = await download_image(self.session, img_url)
             if not img:
                 db_update(post_id, "error")
                 continue
@@ -438,12 +473,18 @@ class MemeBot:
         if db_queue_size() == 0:
             await update.message.reply_text("Очередь пуста — одобри мемы кнопкой ✅")
             return
+        if self._post_lock.locked():
+            await update.message.reply_text("Публикация уже идёт, подожди секунду.")
+            return
         await update.message.reply_text("Публикую...")
-        ok, err = await self.post_next()
-        if ok:
-            await update.message.reply_text(f"Готово! Осталось в очереди: {db_queue_size()}")
-        else:
+        async with self._post_lock:
+            ok, published, err = await self.post_next()
+        if not ok:
             await update.message.reply_text(f"❌ Ошибка публикации: {err}")
+        elif published:
+            await update.message.reply_text(f"Опубликовано! Осталось в очереди: {db_queue_size()}")
+        else:
+            await update.message.reply_text("Не удалось опубликовать — у всех постов пропала картинка. Попробуй /fetch и одобри новые.")
 
     async def cmd_clearqueue(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Сбросить все одобренные посты без file_id (битые)."""
@@ -505,7 +546,7 @@ class MemeBot:
                     "⚠️ Этот мем из старой сессии — база обновилась. Напиши /fetch чтобы получить свежие."
                 )
                 return
-            ensure_img_data(post_id)
+            await ensure_img_data(self.session, post_id)
             await query.edit_message_reply_markup(
                 InlineKeyboardMarkup([[
                     InlineKeyboardButton("✅ Одобрен", callback_data="noop")
@@ -517,7 +558,7 @@ class MemeBot:
         elif action == "caption":
             # Одобряем с подписью — ждём текст; байты сохраним когда придёт подпись
             self.pending_caption = post_id
-            ensure_img_data(post_id)  # сохраняем байты пока URL свежий
+            await ensure_img_data(self.session, post_id)  # сохраняем байты пока URL свежий
             await query.edit_message_reply_markup(
                 InlineKeyboardMarkup([[
                     InlineKeyboardButton("✏️ Жду подпись...", callback_data="noop")
@@ -533,21 +574,27 @@ class MemeBot:
                     "⚠️ Этот мем из старой сессии — база обновилась. Напиши /fetch чтобы получить свежие."
                 )
                 return
-            ensure_img_data(post_id)
+            await ensure_img_data(self.session, post_id)
+            if self._post_lock.locked():
+                await query.message.reply_text("Публикация уже идёт, подожди секунду.")
+                return
             await query.edit_message_reply_markup(
                 InlineKeyboardMarkup([[
                     InlineKeyboardButton("🚀 Публикую...", callback_data="noop")
                 ]])
             )
-            ok, err = await self.post_next()
-            if ok:
+            async with self._post_lock:
+                ok, published, err = await self.post_next()
+            if ok and published:
                 await query.edit_message_reply_markup(
                     InlineKeyboardMarkup([[
                         InlineKeyboardButton("🚀 Опубликован!", callback_data="noop")
                     ]])
                 )
-            else:
+            elif not ok:
                 await query.message.reply_text(f"❌ Ошибка публикации: {err}")
+            else:
+                await query.message.reply_text("Картинка пропала — пост не опубликован. Попробуй /fetch.")
         elif action == "skip":
             db_update(post_id, "skipped")
             await query.edit_message_reply_markup(
@@ -563,7 +610,7 @@ class MemeBot:
         caption = update.message.text.strip()
         db_update_caption(self.pending_caption, caption)
         db_update(self.pending_caption, "approved")
-        ensure_img_data(self.pending_caption)
+        await ensure_img_data(self.session, self.pending_caption)
         self.pending_caption = None
         await update.message.reply_text(f"✅ Добавлено в очередь с подписью:\n_{caption}_\n\nВ очереди: {db_queue_size()}", parse_mode="Markdown")
 
@@ -573,7 +620,7 @@ class MemeBot:
             await update.message.reply_text("Нет мема ожидающего подпись.")
             return
         db_update(self.pending_caption, "approved")
-        ensure_img_data(self.pending_caption)
+        await ensure_img_data(self.session, self.pending_caption)
         self.pending_caption = None
         await update.message.reply_text(f"✅ Добавлено в очередь без подписи. В очереди: {db_queue_size()}")
 
@@ -585,13 +632,20 @@ class MemeBot:
             logging.warning("Нет admin_chat_id — напиши /start боту в личку")
             return
 
-        logging.info("Проверяю каналы...")
-        sent = 0
+        logging.info("Проверяю каналы параллельно...")
+        results = await asyncio.gather(
+            *[fetch_channel(self.session, ch) for ch in SOURCE_CHANNELS],
+            return_exceptions=True,
+        )
 
-        for channel in SOURCE_CHANNELS:
-            posts = fetch_channel(channel)
+        sent = 0
+        skipped_limit = 0
+        for channel, posts in zip(SOURCE_CHANNELS, results):
+            if isinstance(posts, Exception):
+                logging.error(f"Ошибка парсинга {channel}: {posts}")
+                continue
             for post in posts:
-                img = download_image(post["img_url"])
+                img = await download_image(self.session, post["img_url"])
                 if not img:
                     continue
 
@@ -610,6 +664,11 @@ class MemeBot:
                             _db.execute("UPDATE posts SET img_data=? WHERE id=?", (img, row[0]))
                             _db.commit()
                     continue  # уже видели, не показываем снова
+
+                # Лимит на количество отправок за один fetch
+                if sent >= MAX_SEND_PER_FETCH:
+                    skipped_limit += 1
+                    continue  # пост сохранён в базе, покажем через resend_pending в следующий раз
 
                 try:
                     caption = post["caption"]
@@ -639,13 +698,25 @@ class MemeBot:
                 except Exception as e:
                     logging.error(f"Ошибка отправки в личку: {e}")
 
-        logging.info(f"Отправлено на проверку: {sent}")
+        logging.info(f"Отправлено на проверку: {sent}" + (f", отложено (лимит): {skipped_limit}" if skipped_limit else ""))
+        if skipped_limit:
+            try:
+                await self.app.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"Показано {sent} из {sent + skipped_limit} новых мемов. Одобри их и нажми /fetch чтобы получить остальные {skipped_limit}.",
+                )
+            except Exception:
+                pass
         self.last_fetch = datetime.now(MSK)
 
     # ── Публикация в канал ───────────────────────────────────────────
 
     async def post_next(self):
-        # Берём сразу все одобренные посты и перебираем
+        """Возвращает (ok, published, err).
+        ok=True published=True  — мем успешно опубликован
+        ok=True published=False — очередь пуста или все посты битые
+        ok=False published=False — ошибка Telegram API
+        """
         with sqlite3.connect(DB) as _db:
             rows = _db.execute(
                 "SELECT id, channel, msg_id, img_url, user_caption, img_data, file_id FROM posts "
@@ -654,7 +725,7 @@ class MemeBot:
 
         if not rows:
             logging.warning("Очередь пуста, пропускаю слот")
-            return True, None
+            return True, False, None
 
         for post_id, channel, msg_id, img_url, caption, img_data, file_id in rows:
             # file_id — постоянный, не истекает никогда; img_data — байты; остальное — запасные варианты
@@ -663,7 +734,7 @@ class MemeBot:
             elif img_data:
                 photo = BytesIO(img_data)
             else:
-                raw = download_image(img_url) or refetch_image(channel, msg_id)
+                raw = await download_image(self.session, img_url) or await refetch_image(self.session, channel, msg_id)
                 if not raw:
                     logging.warning(f"Пост {post_id}: картинка недоступна, пропускаю")
                     db_update(post_id, "skipped")
@@ -677,19 +748,17 @@ class MemeBot:
                     caption=caption if caption else None,
                 )
                 db_update(post_id, "posted")
-                # Байты больше не нужны — освобождаем место в базе
                 with sqlite3.connect(DB) as _db:
                     _db.execute("UPDATE posts SET img_data=NULL WHERE id=?", (post_id,))
                     _db.commit()
                 logging.info("Мем опубликован в канале")
-                return True, None
+                return True, True, None
             except Exception as e:
                 logging.error(f"Ошибка публикации: {e}")
-                return False, str(e)
+                return False, False, str(e)
 
-        # Все посты оказались битые — очередь очищена, не ошибка
         logging.warning("Все одобренные посты были битые, очередь очищена")
-        return True, None
+        return True, False, None
 
     # ── Главный цикл ─────────────────────────────────────────────────
 
@@ -726,14 +795,41 @@ class MemeBot:
 
             if self.schedule and now >= self.schedule[0]:
                 self.schedule.pop(0)
-                ok, err = await self.post_next()
-                if not ok and err:
+                async with self._post_lock:
+                    ok, published, err = await self.post_next()
+                admin_id = db_get("admin_chat_id")
+                if not ok:
                     logging.error(f"Плановая публикация не удалась: {err}")
+                    if admin_id:
+                        try:
+                            await self.app.bot.send_message(chat_id=admin_id, text=f"❌ Плановая публикация не удалась: {err}")
+                        except Exception:
+                            pass
+                elif published:
+                    logging.info("Плановая публикация прошла успешно")
+                    if admin_id:
+                        next_times = ", ".join(t.strftime("%H:%M") for t in self.schedule) or "больше нет"
+                        try:
+                            await self.app.bot.send_message(
+                                chat_id=admin_id,
+                                text=f"📤 Опубликовано по расписанию\nОсталось в очереди: {db_queue_size()}\nСледующие слоты: {next_times}",
+                            )
+                        except Exception:
+                            pass
+                else:
+                    logging.warning("Плановая публикация: все посты битые")
+                    if admin_id:
+                        try:
+                            await self.app.bot.send_message(chat_id=admin_id, text="⚠️ Плановая публикация: в очереди нет постов с рабочей картинкой. Одобри новые через /fetch.")
+                        except Exception:
+                            pass
 
             await asyncio.sleep(30)
 
     async def run(self):
         from telegram.error import Conflict
+        connector = aiohttp.TCPConnector(limit=20)
+        self.session = aiohttp.ClientSession(headers=HEADERS, connector=connector)
         await self.app.initialize()
         await self.app.start()
         try:
@@ -749,6 +845,7 @@ class MemeBot:
             sys.exit(1)
         finally:
             logging.info("Завершение...")
+            await self.session.close()
             await self.app.updater.stop()
             await self.app.stop()
             await self.app.shutdown()
