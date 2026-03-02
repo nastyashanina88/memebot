@@ -365,6 +365,7 @@ class MemeBot:
         init_db()
 
         self.app.add_handler(CommandHandler("start",      self.cmd_start))
+        self.app.add_handler(CommandHandler("help",       self.cmd_help))
         self.app.add_handler(CommandHandler("queue",      self.cmd_queue))
         self.app.add_handler(CommandHandler("post",       self.cmd_post))
         self.app.add_handler(CommandHandler("fetch",      self.cmd_fetch))
@@ -383,13 +384,30 @@ class MemeBot:
         db_set("admin_chat_id", chat_id)
         await update.message.reply_text(
             "Привет! Я буду присылать сюда мемы для одобрения.\n\n"
-            "✅ — одобрить (без подписи)\n"
-            "✍️ — одобрить с подписью\n"
-            "❌ — пропустить\n\n"
-            "/queue — сколько мемов в очереди\n"
-            "/fetch — проверить каналы прямо сейчас\n"
-            "/post — опубликовать мем вручную\n\n"
+            "✅ — одобрить  |  🚀 — опубликовать сразу  |  ✍️ — с подписью  |  ❌ — пропустить\n\n"
+            "Напиши /help чтобы увидеть все команды.\n\n"
             f"Твой Telegram ID: `{chat_id}`",
+            parse_mode="Markdown"
+        )
+
+    async def cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text(
+            "*Кнопки при одобрении:*\n"
+            "✅ — добавить в очередь без подписи\n"
+            "🚀 — опубликовать прямо сейчас\n"
+            "✍️ — добавить в очередь с подписью\n"
+            "❌ — пропустить мем\n\n"
+            "*Основные команды:*\n"
+            "/fetch — проверить все каналы и прислать новые мемы\n"
+            "/post — опубликовать следующий мем из очереди вручную\n"
+            "/queue — сколько мемов ждут публикации\n"
+            "/schedule — расписание публикаций на сегодня с обратным отсчётом\n"
+            "/status — статистика базы (новые, одобренные, пропущенные, опубликованные)\n\n"
+            "*Служебные команды:*\n"
+            "/skip — одобрить мем без подписи (когда бот ждёт текст подписи)\n"
+            "/clearsent — сбросить все непросмотренные мемы (чистый лист перед /fetch)\n"
+            "/clearqueue — удалить из очереди битые посты без картинки\n"
+            "/start — зарегистрировать этот чат как admin (обычно нужен только один раз)",
             parse_mode="Markdown"
         )
 
