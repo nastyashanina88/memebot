@@ -589,12 +589,14 @@ class MemeBot:
                 "Напиши подпись для мема (или /skip чтобы без подписи):"
             )
         elif action == "now":
-            updated = db_update(post_id, "approved")
-            if not updated:
+            with sqlite3.connect(DB) as _db:
+                row = _db.execute("SELECT status FROM posts WHERE id=?", (post_id,)).fetchone()
+            if not row or row[0] in ("posted", "skipped", "error"):
                 await query.edit_message_reply_markup(
                     InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Устарел", callback_data="noop")]])
                 )
                 return
+            db_update(post_id, "approved")
             await ensure_img_data(self.session, post_id)
             if self._post_lock.locked():
                 await query.message.reply_text("Публикация уже идёт, подожди секунду.")
@@ -605,7 +607,7 @@ class MemeBot:
                 ]])
             )
             async with self._post_lock:
-                ok, published, err = await self.post_next()
+                ok, published, err = await self.post_next(priority_id=post_id)
             if ok and published:
                 await query.edit_message_reply_markup(
                     InlineKeyboardMarkup([[
@@ -732,17 +734,24 @@ class MemeBot:
 
     # ── Публикация в канал ───────────────────────────────────────────
 
-    async def post_next(self):
+    async def post_next(self, priority_id: Optional[int] = None):
         """Возвращает (ok, published, err).
         ok=True published=True  — мем успешно опубликован
         ok=True published=False — очередь пуста или все посты битые
         ok=False published=False — ошибка Telegram API
         """
         with sqlite3.connect(DB) as _db:
-            rows = _db.execute(
-                "SELECT id, channel, msg_id, img_url, user_caption, img_data, file_id FROM posts "
-                "WHERE status='approved' ORDER BY added_at ASC"
-            ).fetchall()
+            if priority_id is not None:
+                rows = _db.execute(
+                    "SELECT id, channel, msg_id, img_url, user_caption, img_data, file_id FROM posts "
+                    "WHERE status='approved' AND id=?",
+                    (priority_id,)
+                ).fetchall()
+            else:
+                rows = _db.execute(
+                    "SELECT id, channel, msg_id, img_url, user_caption, img_data, file_id FROM posts "
+                    "WHERE status='approved' ORDER BY added_at ASC"
+                ).fetchall()
 
         if not rows:
             logging.warning("Очередь пуста, пропускаю слот")
@@ -791,7 +800,8 @@ class MemeBot:
             + ", ".join(t.strftime("%H:%M") for t in self.schedule)
         )
 
-        await self.fetch_and_notify()
+        # Не делаем авто-фетч при старте — только по расписанию или /fetch вручную
+        self.last_fetch = datetime.now(MSK)
 
         while True:
             now = datetime.now(MSK)
