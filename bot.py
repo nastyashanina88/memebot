@@ -110,10 +110,9 @@ def is_good_post(caption: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-_FETCH_SEMAPHORE = asyncio.Semaphore(8)  # максимум 8 одновременных запросов к t.me
 
-async def fetch_channel(session: aiohttp.ClientSession, channel: str, hours_back: int = FETCH_HOURS_BACK) -> list:
-    async with _FETCH_SEMAPHORE:
+async def fetch_channel(session: aiohttp.ClientSession, channel: str, semaphore: asyncio.Semaphore, hours_back: int = FETCH_HOURS_BACK) -> list:
+    async with semaphore:
         try:
             timeout = aiohttp.ClientTimeout(total=10)
             async with session.get(f"https://t.me/s/{channel}", timeout=timeout) as resp:
@@ -355,15 +354,19 @@ def make_schedule() -> list:
 
 class MemeBot:
     def __init__(self):
-        self.app              = Application.builder().token(BOT_TOKEN).build()
+        self.app: Optional[Application] = None
         self.schedule         = []
         self.last_fetch       = None
         self.current_day      = None
         self.pending_caption  = None  # post_id ожидающий подписи
         self.session: Optional[aiohttp.ClientSession] = None
-        self._post_lock       = asyncio.Lock()
+        self._post_lock: Optional[asyncio.Lock] = None
+        self._fetch_semaphore: Optional[asyncio.Semaphore] = None
         init_db()
 
+    def _setup_app(self):
+        """Создаём Application и регистрируем хэндлеры — внутри event loop."""
+        self.app = Application.builder().token(BOT_TOKEN).build()
         self.app.add_handler(CommandHandler("start",      self.cmd_start))
         self.app.add_handler(CommandHandler("help",       self.cmd_help))
         self.app.add_handler(CommandHandler("queue",      self.cmd_queue))
@@ -652,7 +655,7 @@ class MemeBot:
 
         logging.info("Проверяю каналы параллельно...")
         results = await asyncio.gather(
-            *[fetch_channel(self.session, ch) for ch in SOURCE_CHANNELS],
+            *[fetch_channel(self.session, ch, self._fetch_semaphore) for ch in SOURCE_CHANNELS],
             return_exceptions=True,
         )
 
@@ -846,6 +849,10 @@ class MemeBot:
 
     async def run(self):
         from telegram.error import Conflict
+        # Создаём все asyncio-примитивы внутри event loop (Python 3.9 требует это)
+        self._post_lock = asyncio.Lock()
+        self._fetch_semaphore = asyncio.Semaphore(8)
+        self._setup_app()
         connector = aiohttp.TCPConnector(limit=20)
         self.session = aiohttp.ClientSession(headers=HEADERS, connector=connector)
         await self.app.initialize()
