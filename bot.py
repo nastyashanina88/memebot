@@ -561,12 +561,14 @@ class MemeBot:
         post_id = int(post_id)
 
         if action == "approve":
-            updated = db_update(post_id, "approved")
-            if not updated:
+            with sqlite3.connect(DB) as _db:
+                row = _db.execute("SELECT status FROM posts WHERE id=?", (post_id,)).fetchone()
+            if not row or row[0] in ("posted", "skipped", "error"):
                 await query.edit_message_reply_markup(
                     InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Устарел", callback_data="noop")]])
                 )
                 return
+            db_update(post_id, "approved")
             await ensure_img_data(self.session, post_id)
             await query.edit_message_reply_markup(
                 InlineKeyboardMarkup([[
