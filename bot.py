@@ -377,6 +377,7 @@ class MemeBot:
         self.app.add_handler(CommandHandler("schedule",   self.cmd_schedule))
         self.app.add_handler(CommandHandler("clearqueue", self.cmd_clearqueue))
         self.app.add_handler(CommandHandler("clearsent",  self.cmd_clearsent))
+        self.app.add_handler(CommandHandler("showqueue",  self.cmd_showqueue))
         self.app.add_handler(CallbackQueryHandler(self.on_button))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
@@ -404,6 +405,7 @@ class MemeBot:
             "/fetch — проверить все каналы и прислать новые мемы\n"
             "/post — опубликовать следующий мем из очереди вручную\n"
             "/queue — сколько мемов ждут публикации\n"
+            "/showqueue — показать очередь с возможностью убрать или опубликовать сразу\n"
             "/schedule — расписание публикаций на сегодня с обратным отсчётом\n"
             "/status — статистика базы (новые, одобренные, пропущенные, опубликованные)\n\n"
             "*Служебные команды:*\n"
@@ -523,6 +525,38 @@ class MemeBot:
             f"Теперь напиши /fetch — одобри новые мемы и они запостятся."
         )
 
+    async def cmd_showqueue(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Показать все мемы в очереди с кнопкой убрать."""
+        with sqlite3.connect(DB) as db:
+            rows = db.execute(
+                "SELECT id, user_caption, file_id, img_data, img_url, channel, msg_id "
+                "FROM posts WHERE status='approved' ORDER BY added_at ASC"
+            ).fetchall()
+        if not rows:
+            await update.message.reply_text("Очередь пуста.")
+            return
+        await update.message.reply_text(f"В очереди {len(rows)} мемов:")
+        for post_id, caption, file_id, img_data, img_url, channel, msg_id in rows:
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🚀 Опубликовать сейчас", callback_data=f"now:{post_id}"),
+                InlineKeyboardButton("❌ Убрать из очереди", callback_data=f"unqueue:{post_id}"),
+            ]])
+            text = caption or f"@{channel}"
+            try:
+                if file_id:
+                    await update.message.reply_photo(photo=file_id, caption=text, reply_markup=keyboard)
+                elif img_data:
+                    await update.message.reply_photo(photo=BytesIO(img_data), caption=text, reply_markup=keyboard)
+                else:
+                    raw = await download_image(self.session, img_url) or await refetch_image(self.session, channel, msg_id)
+                    if raw:
+                        await update.message.reply_photo(photo=BytesIO(raw), caption=text, reply_markup=keyboard)
+                    else:
+                        await update.message.reply_text(f"#{post_id} {text} — картинка недоступна", reply_markup=keyboard)
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logging.error(f"cmd_showqueue: {e}")
+
     async def cmd_clearsent(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Сбросить все посты которые уже показаны или ещё не показаны — чистый лист."""
         with sqlite3.connect(DB) as db:
@@ -620,6 +654,14 @@ class MemeBot:
                 await query.message.reply_text(f"❌ Ошибка публикации: {err}")
             else:
                 await query.message.reply_text("Картинка пропала — пост не опубликован. Попробуй /fetch.")
+        elif action == "unqueue":
+            db_update(post_id, "skipped")
+            await query.edit_message_reply_markup(
+                InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Убран из очереди", callback_data="noop")
+                ]])
+            )
+            await query.message.reply_text(f"Убрано. В очереди осталось: {db_queue_size()}")
         elif action == "skip":
             db_update(post_id, "skipped")
             await query.edit_message_reply_markup(
