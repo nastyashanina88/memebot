@@ -4,6 +4,7 @@ Meme Bot — парсит каналы, присылает мемы тебе в 
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import random
@@ -67,6 +68,7 @@ MAX_CAPTION_LEN   = 150
 FETCH_INTERVAL    = 3600  # секунды между проверками каналов
 FETCH_HOURS_BACK  = 72    # брать посты за последние N часов
 MAX_SEND_PER_FETCH = 25   # максимум мемов на одобрение за один /fetch
+SHOWQUEUE_LIMIT    = 10   # максимум мемов за один /showqueue
 
 # ─────────────────────────────────────────────────────────────────────
 #  КОНФИГ
@@ -240,6 +242,14 @@ def init_db():
             db.execute("ALTER TABLE posts ADD COLUMN file_id TEXT")
         except Exception:
             pass
+        try:
+            db.execute("ALTER TABLE posts ADD COLUMN img_hash TEXT")
+        except Exception:
+            pass
+        try:
+            db.execute("CREATE INDEX IF NOT EXISTS idx_img_hash ON posts(img_hash)")
+        except Exception:
+            pass
         db.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
@@ -261,12 +271,18 @@ def db_set(key: str, value: str):
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value))
         db.commit()
 
-def db_save_post(channel, msg_id, img_url, caption, img_data: Optional[bytes] = None) -> Optional[int]:
+def db_hash_exists(img_hash: str) -> bool:
+    with sqlite3.connect(DB) as db:
+        return db.execute(
+            "SELECT 1 FROM posts WHERE img_hash=? LIMIT 1", (img_hash,)
+        ).fetchone() is not None
+
+def db_save_post(channel, msg_id, img_url, caption, img_data: Optional[bytes] = None, img_hash: Optional[str] = None) -> Optional[int]:
     try:
         with sqlite3.connect(DB) as db:
             cur = db.execute(
-                "INSERT OR IGNORE INTO posts (channel, msg_id, img_url, caption, img_data) VALUES (?,?,?,?,?)",
-                (channel, msg_id, img_url, caption, img_data),
+                "INSERT OR IGNORE INTO posts (channel, msg_id, img_url, caption, img_data, img_hash) VALUES (?,?,?,?,?,?)",
+                (channel, msg_id, img_url, caption, img_data, img_hash),
             )
             db.commit()
             if cur.lastrowid:
@@ -526,16 +542,23 @@ class MemeBot:
         )
 
     async def cmd_showqueue(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Показать все мемы в очереди с кнопкой убрать."""
+        """Показать первые N мемов в очереди с кнопкой убрать."""
         with sqlite3.connect(DB) as db:
+            total = db.execute("SELECT COUNT(*) FROM posts WHERE status='approved'").fetchone()[0]
             rows = db.execute(
                 "SELECT id, user_caption, file_id, img_data, img_url, channel, msg_id "
-                "FROM posts WHERE status='approved' ORDER BY added_at ASC"
+                "FROM posts WHERE status='approved' ORDER BY added_at ASC LIMIT ?",
+                (SHOWQUEUE_LIMIT,)
             ).fetchall()
         if not rows:
             await update.message.reply_text("Очередь пуста.")
             return
-        await update.message.reply_text(f"В очереди {len(rows)} мемов:")
+        header = f"В очереди {total} мемов"
+        if total > SHOWQUEUE_LIMIT:
+            header += f" (показываю первые {SHOWQUEUE_LIMIT}):"
+        else:
+            header += ":"
+        await update.message.reply_text(header)
         for post_id, caption, file_id, img_data, img_url, channel, msg_id in rows:
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("🚀 Опубликовать сейчас", callback_data=f"now:{post_id}"),
@@ -556,6 +579,8 @@ class MemeBot:
                 await asyncio.sleep(0.3)
             except Exception as e:
                 logging.error(f"cmd_showqueue: {e}")
+        if total > SHOWQUEUE_LIMIT:
+            await update.message.reply_text(f"...ещё {total - SHOWQUEUE_LIMIT} мемов. Вызови /showqueue снова после публикации первых.")
 
     async def cmd_clearsent(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Сбросить все посты которые уже показаны или ещё не показаны — чистый лист."""
@@ -737,9 +762,14 @@ class MemeBot:
                 if not img:
                     continue
 
+                img_hash = hashlib.md5(img).hexdigest()
+                if db_hash_exists(img_hash):
+                    logging.debug(f"Дубликат мема из @{post['channel']}, пропускаю")
+                    continue
+
                 post_id = db_save_post(
                     post["channel"], post["msg_id"],
-                    post["img_url"],  post["caption"], img,
+                    post["img_url"],  post["caption"], img, img_hash,
                 )
                 if not post_id:
                     # Пост уже в базе — обновляем img_data если его нет
