@@ -329,7 +329,7 @@ def db_get_new_posts() -> list:
     """Посты которые в базе но ещё не просмотрены."""
     with sqlite3.connect(DB) as db:
         return db.execute(
-            "SELECT id, channel, img_url, caption FROM posts WHERE status='new' ORDER BY added_at ASC LIMIT 30"
+            "SELECT id, channel, msg_id, img_url, caption, img_data FROM posts WHERE status='new' ORDER BY added_at ASC LIMIT 30"
         ).fetchall()
 
 # ─────────────────────────────────────────────────────────────────────
@@ -463,8 +463,8 @@ class MemeBot:
         if not admin_id:
             return
         rows = db_get_new_posts()
-        for post_id, channel, img_url, caption in rows:
-            img = await download_image(self.session, img_url)
+        for post_id, channel, msg_id, img_url, caption, img_data in rows:
+            img = img_data or await download_image(self.session, img_url) or await refetch_image(self.session, channel, msg_id)
             if not img:
                 db_update(post_id, "error")
                 continue
