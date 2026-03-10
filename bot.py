@@ -602,6 +602,9 @@ class MemeBot:
                     InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Устарел", callback_data="noop")]])
                 )
                 return
+            if row[0] == "approved":
+                await query.answer("Уже в очереди!", show_alert=False)
+                return
             db_update(post_id, "approved")
             await ensure_img_data(self.session, post_id)
             await query.edit_message_reply_markup(
@@ -620,7 +623,11 @@ class MemeBot:
                     InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Устарел", callback_data="noop")]])
                 )
                 return
+            # Если уже ждём подпись для другого поста — одобряем его без подписи
+            if self.pending_caption and self.pending_caption != post_id:
+                db_update(self.pending_caption, "approved")
             self.pending_caption = post_id
+            db_set("pending_caption", str(post_id))
             await ensure_img_data(self.session, post_id)  # сохраняем байты пока URL свежий
             await query.edit_message_reply_markup(
                 InlineKeyboardMarkup([[
@@ -691,6 +698,7 @@ class MemeBot:
         db_update(self.pending_caption, "approved")
         await ensure_img_data(self.session, self.pending_caption)
         self.pending_caption = None
+        db_set("pending_caption", "")
         await update.message.reply_text(f"✅ Добавлено в очередь с подписью:\n_{caption}_\n\nВ очереди: {db_queue_size()}", parse_mode="Markdown")
 
     async def cmd_skip_caption(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -701,6 +709,7 @@ class MemeBot:
         db_update(self.pending_caption, "approved")
         await ensure_img_data(self.session, self.pending_caption)
         self.pending_caption = None
+        db_set("pending_caption", "")
         await update.message.reply_text(f"✅ Добавлено в очередь без подписи. В очереди: {db_queue_size()}")
 
     # ── Сбор и отправка мемов ────────────────────────────────────────
@@ -918,6 +927,11 @@ class MemeBot:
         # Создаём все asyncio-примитивы внутри event loop (Python 3.9 требует это)
         self._post_lock = asyncio.Lock()
         self._fetch_semaphore = asyncio.Semaphore(8)
+        # Восстанавливаем pending_caption после перезапуска
+        saved = db_get("pending_caption")
+        if saved:
+            self.pending_caption = int(saved)
+            logging.info(f"Восстановлен pending_caption={self.pending_caption} из базы")
         self._setup_app()
         connector = aiohttp.TCPConnector(limit=20)
         self.session = aiohttp.ClientSession(headers=HEADERS, connector=connector)
