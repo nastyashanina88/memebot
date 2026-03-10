@@ -613,7 +613,13 @@ class MemeBot:
                 f"✅ Добавлено в очередь! В очереди: {db_queue_size()}"
             )
         elif action == "caption":
-            # Одобряем с подписью — ждём текст; байты сохраним когда придёт подпись
+            with sqlite3.connect(DB) as _db:
+                row = _db.execute("SELECT status FROM posts WHERE id=?", (post_id,)).fetchone()
+            if not row or row[0] in ("posted", "skipped", "error"):
+                await query.edit_message_reply_markup(
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Устарел", callback_data="noop")]])
+                )
+                return
             self.pending_caption = post_id
             await ensure_img_data(self.session, post_id)  # сохраняем байты пока URL свежий
             await query.edit_message_reply_markup(
@@ -651,8 +657,14 @@ class MemeBot:
                     ]])
                 )
             elif not ok:
+                await query.edit_message_reply_markup(
+                    InlineKeyboardMarkup([[InlineKeyboardButton("❌ Ошибка", callback_data="noop")]])
+                )
                 await query.message.reply_text(f"❌ Ошибка публикации: {err}")
             else:
+                await query.edit_message_reply_markup(
+                    InlineKeyboardMarkup([[InlineKeyboardButton("⚠️ Картинка пропала", callback_data="noop")]])
+                )
                 await query.message.reply_text("Картинка пропала — пост не опубликован. Попробуй /fetch.")
         elif action == "unqueue":
             db_update(post_id, "skipped")
