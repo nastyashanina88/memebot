@@ -250,6 +250,10 @@ def init_db():
             db.execute("CREATE INDEX IF NOT EXISTS idx_img_hash ON posts(img_hash)")
         except Exception:
             pass
+        try:
+            db.execute("ALTER TABLE posts ADD COLUMN tg_msg_id INTEGER")
+        except Exception:
+            pass
         db.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
@@ -311,6 +315,11 @@ def db_save_img_data(post_id: int, img_data: bytes):
 def db_save_file_id(post_id: int, file_id: str):
     with sqlite3.connect(DB) as db:
         db.execute("UPDATE posts SET file_id=? WHERE id=?", (file_id, post_id))
+        db.commit()
+
+def db_save_msg_id(post_id: int, msg_id: int):
+    with sqlite3.connect(DB) as db:
+        db.execute("UPDATE posts SET tg_msg_id=? WHERE id=?", (msg_id, post_id))
         db.commit()
 
 async def ensure_img_data(session: aiohttp.ClientSession, post_id: int):
@@ -501,6 +510,7 @@ class MemeBot:
                 )
                 fid = sent_msg.photo[-1].file_id
                 db_save_file_id(post_id, fid)
+                db_save_msg_id(post_id, sent_msg.message_id)
                 db_save_img_data(post_id, img)
                 db_update(post_id, "sent")
                 await asyncio.sleep(0.5)
@@ -737,6 +747,30 @@ class MemeBot:
         db_set("pending_caption", "")
         await update.message.reply_text(f"✅ Добавлено в очередь без подписи. В очереди: {db_queue_size()}")
 
+    # ── Утилиты ──────────────────────────────────────────────────────
+
+    async def _try_update_admin_markup(self, post_id: int, button_text: str):
+        """Обновить кнопки у сообщения в чате админа (тихо игнорирует ошибки)."""
+        try:
+            with sqlite3.connect(DB) as _db:
+                row = _db.execute(
+                    "SELECT tg_msg_id FROM posts WHERE id=?", (post_id,)
+                ).fetchone()
+            if not row or not row[0]:
+                return
+            admin_id = db_get("admin_chat_id")
+            if not admin_id:
+                return
+            await self.app.bot.edit_message_reply_markup(
+                chat_id=admin_id,
+                message_id=row[0],
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(button_text, callback_data="noop")
+                ]]),
+            )
+        except Exception:
+            pass
+
     # ── Сбор и отправка мемов ────────────────────────────────────────
 
     async def fetch_and_notify(self):
@@ -809,6 +843,7 @@ class MemeBot:
                     # Сохраняем file_id — он постоянный, не истекает
                     fid = sent_msg.photo[-1].file_id
                     db_save_file_id(post_id, fid)
+                    db_save_msg_id(post_id, sent_msg.message_id)
                     db_update(post_id, "sent")
                     sent += 1
                     await asyncio.sleep(0.5)
@@ -863,6 +898,7 @@ class MemeBot:
                 if not raw:
                     logging.warning(f"Пост {post_id}: картинка недоступна, пропускаю")
                     db_update(post_id, "skipped")
+                    await self._try_update_admin_markup(post_id, "⚠️ Картинка пропала")
                     continue
                 photo = BytesIO(raw)
 
@@ -877,6 +913,7 @@ class MemeBot:
                     _db.execute("UPDATE posts SET img_data=NULL WHERE id=?", (post_id,))
                     _db.commit()
                 logging.info("Мем опубликован в канале")
+                await self._try_update_admin_markup(post_id, "📤 Опубликован!")
                 return True, True, None
             except Exception as e:
                 logging.error(f"Ошибка публикации: {e}")
