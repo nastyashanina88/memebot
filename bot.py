@@ -637,6 +637,7 @@ class MemeBot:
         self.app.add_handler(CommandHandler("removechannel", self.cmd_removechannel))
         self.app.add_handler(CommandHandler("listchannels",  self.cmd_listchannels))
         self.app.add_handler(CommandHandler("trustchannel",  self.cmd_trustchannel))
+        self.app.add_handler(CommandHandler("vacuum",         self.cmd_vacuum))
         self.app.add_handler(CallbackQueryHandler(self.on_button))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
@@ -856,6 +857,25 @@ class MemeBot:
             f"❌ Пропущено: {skipped_cnt}\n"
             f"📤 Опубликовано: {posted_cnt}\n\n"
             f"📡 Каналов-источников: {len(channels)} (авто: {trusted_cnt})"
+        )
+
+    async def cmd_vacuum(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("Чищу базу...")
+        with sqlite3.connect(DB) as db:
+            freed = db.execute(
+                "UPDATE posts SET img_data=NULL, file_id=NULL "
+                "WHERE status IN ('posted','skipped','error') AND img_data IS NOT NULL"
+            ).rowcount
+            deleted = db.execute(
+                "DELETE FROM posts WHERE status IN ('posted','skipped','error') "
+                "AND added_at < datetime('now', '-7 days')"
+            ).rowcount
+            db.execute("VACUUM")
+            db.commit()
+        await update.message.reply_text(
+            f"✅ Готово:\n"
+            f"  • Очищено img_data: {freed} постов\n"
+            f"  • Удалено старых записей: {deleted}"
         )
 
     # ── Управление каналами ───────────────────────────────────────────
@@ -1405,9 +1425,14 @@ class MemeBot:
                         "DELETE FROM posts WHERE status IN ('posted','skipped','error') "
                         "AND added_at < datetime('now', '-30 days')"
                     ).rowcount
+                    freed = _db.execute(
+                        "UPDATE posts SET img_data=NULL, file_id=NULL "
+                        "WHERE status IN ('posted','skipped','error') AND img_data IS NOT NULL"
+                    ).rowcount
+                    _db.execute("VACUUM")
                     _db.commit()
-                if deleted:
-                    logging.info(f"Очистка базы: удалено {deleted} старых записей")
+                if deleted or freed:
+                    logging.info(f"Очистка базы: удалено {deleted} записей, очищено img_data у {freed}")
 
             if self.last_fetch is None or (now - self.last_fetch).total_seconds() >= FETCH_INTERVAL:
                 await self.fetch_and_notify()
