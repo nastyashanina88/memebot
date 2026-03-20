@@ -22,15 +22,22 @@ pgrep -fa bot.py          # найти процесс
 kill <PID>                # убить его
 ```
 
-Убедиться что LaunchAgent отключён (он должен быть выгружен):
+Убедиться что оба LaunchAgent выгружены (должны быть **выгружены навсегда**):
 ```bash
-launchctl list | grep memebot   # не должно показывать PID, только "- 0 com.possum.memebot"
+launchctl list | grep memebot   # должна быть пустая строка
 ```
 
-Если LaunchAgent активен — выгрузить:
+Если что-то есть — выгрузить:
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.possum.memebot.plist
+launchctl unload ~/Library/LaunchAgents/com.possum.memebot.healthcheck.plist
 ```
+
+### Почему healthcheck.py нельзя использовать
+
+`healthcheck.py` проверяет наличие `bot.pid` и если его нет — **запускает бота локально**. Так как бот на Railway не создаёт локальный `bot.pid`, каждое утро в 9:00 healthcheck поднимал второй инстанс, который конфликтовал с Railway → кнопки переставали работать.
+
+`healthcheck.py` и оба LaunchAgent (`com.possum.memebot`, `com.possum.memebot.healthcheck`) должны оставаться **выгруженными**. Не загружать их снова.
 
 ---
 
