@@ -54,8 +54,8 @@ PHASH_THRESHOLD    = 10
 #  КОНФИГ
 # ─────────────────────────────────────────────────────────────────────
 
-BOT_TOKEN     = os.getenv("BOT_TOKEN", "")
-MY_CHANNEL    = os.getenv("MY_CHANNEL", "")
+BOT_TOKEN     = os.getenv("BOT_TOKEN", "").strip()
+MY_CHANNEL    = os.getenv("MY_CHANNEL", "").strip()
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
 MSK           = pytz.timezone("Europe/Moscow")
 
