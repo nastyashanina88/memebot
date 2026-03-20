@@ -353,7 +353,6 @@ def db_phash_is_duplicate(phash_str: str) -> bool:
 
 
 def db_save_post(channel, msg_id, img_url, caption,
-                 img_data: Optional[bytes] = None,
                  img_hash: Optional[str] = None,
                  media_type: str = "photo",
                  phash: Optional[str] = None,
@@ -362,10 +361,9 @@ def db_save_post(channel, msg_id, img_url, caption,
         with sqlite3.connect(DB) as db:
             cur = db.execute(
                 "INSERT OR IGNORE INTO posts "
-                "(channel, msg_id, img_url, caption, img_data, img_hash, media_type, phash, is_album) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+                "(channel, msg_id, img_url, caption, img_hash, media_type, phash, is_album) "
+                "VALUES (?,?,?,?,?,?,?,?)",
                 (channel, msg_id, img_url, caption,
-                 None if is_album else img_data,   # для альбомов img_data не используем в posts
                  img_hash, media_type, phash, int(is_album)),
             )
             db.commit()
@@ -376,12 +374,12 @@ def db_save_post(channel, msg_id, img_url, caption,
     return None
 
 
-def db_save_album_media(post_id: int, items: list):
-    """items = [(img_url, img_data), ...]"""
+def db_save_album_media(post_id: int, urls: list):
+    """urls = [img_url, ...] — binary data is never stored, downloaded on demand."""
     with sqlite3.connect(DB) as db:
         db.executemany(
-            "INSERT OR IGNORE INTO album_media (post_id, idx, img_url, img_data) VALUES (?,?,?,?)",
-            [(post_id, i, url, data) for i, (url, data) in enumerate(items)]
+            "INSERT OR IGNORE INTO album_media (post_id, idx, img_url) VALUES (?,?,?)",
+            [(post_id, i, url) for i, url in enumerate(urls)]
         )
         db.commit()
 
@@ -447,7 +445,7 @@ def db_queue_size() -> int:
 def db_get_new_posts() -> list:
     with sqlite3.connect(DB) as db:
         return db.execute(
-            "SELECT id, channel, msg_id, img_url, caption, img_data, media_type, is_album "
+            "SELECT id, channel, msg_id, img_url, caption, media_type, is_album "
             "FROM posts WHERE status='new' ORDER BY added_at ASC LIMIT ?",
             (MAX_SEND_PER_FETCH,)
         ).fetchall()
@@ -504,37 +502,8 @@ def db_is_trusted(username: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────
 
 async def ensure_img_data(session: aiohttp.ClientSession, post_id: int):
-    """Гарантирует что байты медиа сохранены перед одобрением."""
-    with sqlite3.connect(DB) as db:
-        row = db.execute(
-            "SELECT channel, msg_id, img_url, img_data, media_type, is_album FROM posts WHERE id=?",
-            (post_id,)
-        ).fetchone()
-    if not row:
-        return
-    channel, msg_id, img_url, img_data, media_type, is_album = row
-    media_type = media_type or "photo"
-
-    if is_album:
-        # Для альбомов: качаем все недостающие фото из album_media
-        items = db_get_album_media(post_id)
-        with sqlite3.connect(DB) as db:
-            for idx, a_url, a_data, _ in items:
-                if not a_data:
-                    raw = await download_media(session, a_url)
-                    if raw:
-                        db.execute(
-                            "UPDATE album_media SET img_data=? WHERE post_id=? AND idx=?",
-                            (raw, post_id, idx)
-                        )
-            db.commit()
-    else:
-        if img_data:
-            return
-        img = (await download_media(session, img_url) or
-               await refetch_media(session, channel, msg_id, media_type))
-        if img:
-            db_save_img_data(post_id, img)
+    """No-op: img_data is no longer stored in the database."""
+    pass
 
 
 async def send_media(bot, chat_id, media_type: str, data,
@@ -572,8 +541,6 @@ async def build_input_media(session, post_id: int,
     for i, (idx, img_url, img_data, file_id) in enumerate(items):
         if file_id:
             data = file_id
-        elif img_data:
-            data = BytesIO(img_data)
         else:
             raw = await download_media(session, img_url)
             if not raw:
@@ -757,23 +724,23 @@ class MemeBot:
 
     async def cmd_clearqueue(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         with sqlite3.connect(DB) as db:
-            # Одиночные посты без источника
+            # Одиночные посты без URL и без file_id
             n1 = db.execute(
                 "SELECT COUNT(*) FROM posts WHERE status='approved' AND is_album=0 "
-                "AND file_id IS NULL AND img_data IS NULL"
+                "AND file_id IS NULL AND img_url IS NULL"
             ).fetchone()[0]
             db.execute(
                 "UPDATE posts SET status='skipped' WHERE status='approved' AND is_album=0 "
-                "AND file_id IS NULL AND img_data IS NULL"
+                "AND file_id IS NULL AND img_url IS NULL"
             )
-            # Альбомы без данных в album_media
+            # Альбомы без записей в album_media
             album_ids = [r[0] for r in db.execute(
                 "SELECT id FROM posts WHERE status='approved' AND is_album=1"
             ).fetchall()]
             n2 = 0
             for aid in album_ids:
                 has_data = db.execute(
-                    "SELECT 1 FROM album_media WHERE post_id=? AND (img_data IS NOT NULL OR file_id IS NOT NULL) LIMIT 1",
+                    "SELECT 1 FROM album_media WHERE post_id=? AND (img_url IS NOT NULL OR file_id IS NOT NULL) LIMIT 1",
                     (aid,)
                 ).fetchone()
                 if not has_data:
@@ -790,7 +757,7 @@ class MemeBot:
         with sqlite3.connect(DB) as db:
             total = db.execute("SELECT COUNT(*) FROM posts WHERE status='approved'").fetchone()[0]
             rows  = db.execute(
-                "SELECT id, user_caption, file_id, img_data, img_url, channel, msg_id, media_type, is_album "
+                "SELECT id, user_caption, file_id, img_url, channel, msg_id, media_type, is_album "
                 "FROM posts WHERE status='approved' ORDER BY added_at ASC LIMIT ?",
                 (SHOWQUEUE_LIMIT,)
             ).fetchall()
@@ -804,7 +771,7 @@ class MemeBot:
             header += ":"
         await update.message.reply_text(header)
 
-        for post_id, caption, file_id, img_data, img_url, channel, msg_id, media_type, is_album in rows:
+        for post_id, caption, file_id, img_url, channel, msg_id, media_type, is_album in rows:
             media_type = media_type or "photo"
             keyboard   = InlineKeyboardMarkup([[
                 InlineKeyboardButton("🚀 Опубликовать", callback_data=f"now:{post_id}"),
@@ -826,8 +793,6 @@ class MemeBot:
                     sources = []
                     if file_id:
                         sources.append(file_id)
-                    if img_data:
-                        sources.append(BytesIO(img_data))
                     sent = False
                     for src in sources:
                         try:
@@ -1157,7 +1122,7 @@ class MemeBot:
         if not admin_id:
             return
         rows = db_get_new_posts()
-        for post_id, channel, msg_id, img_url, caption, img_data, media_type, is_album in rows:
+        for post_id, channel, msg_id, img_url, caption, media_type, is_album in rows:
             media_type = media_type or "photo"
             label      = f"📌 @{channel}"
             text       = f"{caption}\n\n{label}" if caption else label
@@ -1178,8 +1143,7 @@ class MemeBot:
                         logging.warning(f"resend_pending: альбом {post_id} не удалось отправить")
                         continue
                 else:
-                    img = (img_data or
-                           await download_media(self.session, img_url) or
+                    img = (await download_media(self.session, img_url) or
                            await refetch_media(self.session, channel, msg_id, media_type))
                     if not img:
                         logging.warning(f"resend_pending: пост {post_id} медиа недоступно")
@@ -1190,7 +1154,6 @@ class MemeBot:
                     if fid:
                         db_save_file_id(post_id, fid)
                     db_save_msg_id(post_id, sent_msg.message_id)
-                    db_save_img_data(post_id, img)
                 db_update(post_id, "sent")
                 await asyncio.sleep(0.5)
             except Exception as e:
@@ -1245,35 +1208,18 @@ class MemeBot:
                 post_id = db_save_post(
                     post["channel"], post["msg_id"],
                     post["media_url"], post["caption"],
-                    first_img, img_hash, post["media_type"], phash_str,
+                    img_hash, post["media_type"], phash_str,
                     is_album=post["is_album"],
                 )
                 if not post_id:
-                    # Уже в базе — обновляем img_data если нет
-                    if not post["is_album"]:
-                        with sqlite3.connect(DB) as _db:
-                            row = _db.execute(
-                                "SELECT id FROM posts WHERE channel=? AND msg_id=? AND img_data IS NULL",
-                                (post["channel"], post["msg_id"])
-                            ).fetchone()
-                            if row:
-                                _db.execute("UPDATE posts SET img_data=? WHERE id=?",
-                                            (first_img, row[0]))
-                                _db.commit()
                     continue
 
-                # Для альбомов — скачиваем и сохраняем все фото
+                # Для альбомов — сохраняем только URL-адреса
                 if post["is_album"]:
-                    album_items = []
-                    for url in post["media_urls"]:
-                        raw = await download_media(self.session, url)
-                        album_items.append((url, raw))
-                    db_save_album_media(post_id, album_items)
+                    db_save_album_media(post_id, post["media_urls"])
 
                 if is_trusted:
                     db_update(post_id, "approved")
-                    if not post["is_album"]:
-                        db_save_img_data(post_id, first_img)
                     logging.info(f"Авто-одобрен пост {post_id} из @{channel}")
                     continue
 
@@ -1333,7 +1279,7 @@ class MemeBot:
         with sqlite3.connect(DB) as _db:
             if priority_id is not None:
                 rows = _db.execute(
-                    "SELECT id, channel, msg_id, img_url, user_caption, img_data, file_id, media_type, is_album "
+                    "SELECT id, channel, msg_id, img_url, user_caption, file_id, media_type, is_album "
                     "FROM posts WHERE status='approved' AND id=?",
                     (priority_id,)
                 ).fetchall()
@@ -1345,7 +1291,7 @@ class MemeBot:
                         return True, None, None
             else:
                 rows = _db.execute(
-                    "SELECT id, channel, msg_id, img_url, user_caption, img_data, file_id, media_type, is_album "
+                    "SELECT id, channel, msg_id, img_url, user_caption, file_id, media_type, is_album "
                     "FROM posts WHERE status='approved' ORDER BY added_at ASC"
                 ).fetchall()
 
@@ -1353,7 +1299,7 @@ class MemeBot:
             logging.warning("Очередь пуста, пропускаю слот")
             return True, False, None
 
-        for post_id, channel, msg_id, img_url, caption, img_data, file_id, media_type, is_album in rows:
+        for post_id, channel, msg_id, img_url, caption, file_id, media_type, is_album in rows:
             media_type = media_type or "photo"
             try:
                 if is_album:
@@ -1382,8 +1328,6 @@ class MemeBot:
                     sources = []
                     if file_id:
                         sources.append(file_id)
-                    if img_data:
-                        sources.append(BytesIO(img_data))
                     if not sources:
                         raw = (await download_media(self.session, img_url) or
                                await refetch_media(self.session, channel, msg_id, media_type))
