@@ -219,6 +219,26 @@ _default_db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data
 os.makedirs(_default_db_dir, exist_ok=True)
 DB = os.path.join(os.getenv("DATA_DIR", _default_db_dir), "memes.db")
 
+def emergency_cleanup_db():
+    """Очистка img_data при старте — работает даже когда диск забит (journal in RAM)."""
+    try:
+        with sqlite3.connect(DB) as db:
+            db.execute("PRAGMA journal_mode=MEMORY")
+            freed = db.execute(
+                "UPDATE posts SET img_data=NULL, file_id=NULL "
+                "WHERE status IN ('posted','skipped','error') AND img_data IS NOT NULL"
+            ).rowcount
+            deleted = db.execute(
+                "DELETE FROM posts WHERE status IN ('posted','skipped','error') "
+                "AND added_at < datetime('now', '-14 days')"
+            ).rowcount
+            db.commit()
+        if freed or deleted:
+            logging.info(f"Стартовая очистка: img_data очищено у {freed}, удалено {deleted} записей")
+    except Exception as e:
+        logging.warning(f"Стартовая очистка не удалась: {e}")
+
+
 def init_db():
     with sqlite3.connect(DB) as db:
         db.execute("""
@@ -618,6 +638,7 @@ class MemeBot:
         self.session: Optional[aiohttp.ClientSession] = None
         self._post_lock: Optional[asyncio.Lock] = None
         self._fetch_semaphore: Optional[asyncio.Semaphore] = None
+        emergency_cleanup_db()
         init_db()
 
     def _setup_app(self):
