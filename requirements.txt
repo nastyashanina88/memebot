@@ -3,3 +3,5 @@ python-dotenv==1.0.1
 pytz==2024.2
 aiohttp==3.11.14
 beautifulsoup4==4.12.3
+Pillow>=10.0.0
+ImageHash>=4.3.1
