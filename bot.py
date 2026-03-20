@@ -409,6 +409,8 @@ def db_save_album_file_ids(post_id: int, file_ids: list):
 def db_update(post_id: int, status: str) -> bool:
     with sqlite3.connect(DB) as db:
         cur = db.execute("UPDATE posts SET status=? WHERE id=?", (status, post_id))
+        if status in ("posted", "skipped", "error"):
+            db.execute("UPDATE posts SET img_data=NULL, file_id=NULL WHERE id=?", (post_id,))
         db.commit()
         return cur.rowcount > 0
 
