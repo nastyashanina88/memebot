@@ -11,6 +11,7 @@ import random
 import re
 import sqlite3
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Optional
@@ -219,11 +220,25 @@ _default_db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data
 os.makedirs(_default_db_dir, exist_ok=True)
 DB = os.path.join(os.getenv("DATA_DIR", _default_db_dir), "memes.db")
 
+@contextmanager
+def db_open():
+    """Открывает соединение с БД с journal_mode=MEMORY — безопасно на полном диске."""
+    conn = sqlite3.connect(DB)
+    conn.execute("PRAGMA journal_mode=MEMORY")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def emergency_cleanup_db():
     """Очистка img_data при старте — работает даже когда диск забит (journal in RAM)."""
     try:
-        with sqlite3.connect(DB) as db:
-            db.execute("PRAGMA journal_mode=MEMORY")
+        with db_open() as db:
             # Очищаем img_data у ВСЕХ постов — больше не храним бинарные данные
             freed = db.execute(
                 "UPDATE posts SET img_data=NULL WHERE img_data IS NOT NULL"
@@ -243,7 +258,7 @@ def emergency_cleanup_db():
 
 
 def init_db():
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         db.execute("""
             CREATE TABLE IF NOT EXISTS posts (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -310,19 +325,19 @@ def init_db():
 def db_get(key: str) -> Optional[str]:
     if key == "admin_chat_id" and ADMIN_CHAT_ID:
         return ADMIN_CHAT_ID
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         r = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return r[0] if r else None
 
 
 def db_set(key: str, value: str):
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value))
         db.commit()
 
 
 def db_hash_exists(img_hash: str) -> bool:
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         return db.execute(
             "SELECT 1 FROM posts WHERE img_hash=? LIMIT 1", (img_hash,)
         ).fetchone() is not None
@@ -339,7 +354,7 @@ def compute_phash(img_data: bytes) -> Optional[str]:
 def db_phash_is_duplicate(phash_str: str) -> bool:
     try:
         new_hash = imagehash.hex_to_hash(phash_str)
-        with sqlite3.connect(DB) as db:
+        with db_open() as db:
             rows = db.execute(
                 "SELECT phash FROM posts WHERE phash IS NOT NULL "
                 "AND added_at > datetime('now', '-30 days')"
@@ -361,7 +376,7 @@ def db_save_post(channel, msg_id, img_url, caption,
                  phash: Optional[str] = None,
                  is_album: bool = False) -> Optional[int]:
     try:
-        with sqlite3.connect(DB) as db:
+        with db_open() as db:
             cur = db.execute(
                 "INSERT OR IGNORE INTO posts "
                 "(channel, msg_id, img_url, caption, img_hash, media_type, phash, is_album) "
@@ -379,7 +394,7 @@ def db_save_post(channel, msg_id, img_url, caption,
 
 def db_save_album_media(post_id: int, urls: list):
     """urls = [img_url, ...] — binary data is never stored, downloaded on demand."""
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         db.executemany(
             "INSERT OR IGNORE INTO album_media (post_id, idx, img_url) VALUES (?,?,?)",
             [(post_id, i, url) for i, url in enumerate(urls)]
@@ -389,7 +404,7 @@ def db_save_album_media(post_id: int, urls: list):
 
 def db_get_album_media(post_id: int) -> list:
     """Возвращает [(idx, img_url, img_data, file_id), ...]"""
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         return db.execute(
             "SELECT idx, img_url, img_data, file_id FROM album_media WHERE post_id=? ORDER BY idx",
             (post_id,)
@@ -397,7 +412,7 @@ def db_get_album_media(post_id: int) -> list:
 
 
 def db_save_album_file_ids(post_id: int, file_ids: list):
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         for i, fid in enumerate(file_ids):
             if fid:
                 db.execute(
@@ -408,7 +423,7 @@ def db_save_album_file_ids(post_id: int, file_ids: list):
 
 
 def db_update(post_id: int, status: str) -> bool:
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         cur = db.execute("UPDATE posts SET status=? WHERE id=?", (status, post_id))
         if status in ("posted", "skipped", "error"):
             db.execute("UPDATE posts SET img_data=NULL, file_id=NULL WHERE id=?", (post_id,))
@@ -417,36 +432,36 @@ def db_update(post_id: int, status: str) -> bool:
 
 
 def db_update_caption(post_id: int, caption: str):
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         db.execute("UPDATE posts SET user_caption=? WHERE id=?", (caption, post_id))
         db.commit()
 
 
 def db_save_img_data(post_id: int, img_data: bytes):
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         db.execute("UPDATE posts SET img_data=? WHERE id=?", (img_data, post_id))
         db.commit()
 
 
 def db_save_file_id(post_id: int, file_id: str):
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         db.execute("UPDATE posts SET file_id=? WHERE id=?", (file_id, post_id))
         db.commit()
 
 
 def db_save_msg_id(post_id: int, msg_id: int):
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         db.execute("UPDATE posts SET tg_msg_id=? WHERE id=?", (msg_id, post_id))
         db.commit()
 
 
 def db_queue_size() -> int:
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         return db.execute("SELECT COUNT(*) FROM posts WHERE status='approved'").fetchone()[0]
 
 
 def db_get_new_posts() -> list:
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         return db.execute(
             "SELECT id, channel, msg_id, img_url, caption, media_type, is_album "
             "FROM posts WHERE status='new' AND added_at > datetime('now', '-48 hours') "
@@ -458,7 +473,7 @@ def db_get_new_posts() -> list:
 # ── Каналы ────────────────────────────────────────────────────────────
 
 def db_get_channels() -> list:
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         return db.execute(
             "SELECT username, trusted FROM channels ORDER BY username"
         ).fetchall()
@@ -466,7 +481,7 @@ def db_get_channels() -> list:
 
 def db_add_channel(username: str, trusted: bool = False) -> bool:
     try:
-        with sqlite3.connect(DB) as db:
+        with db_open() as db:
             db.execute(
                 "INSERT OR IGNORE INTO channels (username, trusted) VALUES (?, ?)",
                 (username, int(trusted))
@@ -479,14 +494,14 @@ def db_add_channel(username: str, trusted: bool = False) -> bool:
 
 
 def db_remove_channel(username: str) -> bool:
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         cur = db.execute("DELETE FROM channels WHERE username=?", (username,))
         db.commit()
         return cur.rowcount > 0
 
 
 def db_set_trusted(username: str, trusted: bool) -> bool:
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         cur = db.execute(
             "UPDATE channels SET trusted=? WHERE username=?", (int(trusted), username)
         )
@@ -495,7 +510,7 @@ def db_set_trusted(username: str, trusted: bool) -> bool:
 
 
 def db_is_trusted(username: str) -> bool:
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         row = db.execute(
             "SELECT trusted FROM channels WHERE username=?", (username,)
         ).fetchone()
@@ -537,7 +552,7 @@ async def build_input_media(session, post_id: int,
     items = db_get_album_media(post_id)
     if not items:
         return []
-    with sqlite3.connect(DB) as db:
+    with db_open() as db:
         row = db.execute("SELECT media_type FROM posts WHERE id=?", (post_id,)).fetchone()
     media_type = (row[0] if row else None) or "photo"
 
@@ -727,7 +742,7 @@ class MemeBot:
             await update.message.reply_text("Не удалось опубликовать — у всех постов пропало медиа. Попробуй /fetch.")
 
     async def cmd_clearqueue(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        with sqlite3.connect(DB) as db:
+        with db_open() as db:
             # Одиночные посты без URL и без file_id
             n1 = db.execute(
                 "SELECT COUNT(*) FROM posts WHERE status='approved' AND is_album=0 "
@@ -758,7 +773,7 @@ class MemeBot:
         )
 
     async def cmd_showqueue(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        with sqlite3.connect(DB) as db:
+        with db_open() as db:
             total = db.execute("SELECT COUNT(*) FROM posts WHERE status='approved'").fetchone()[0]
             rows  = db.execute(
                 "SELECT id, user_caption, file_id, img_url, channel, msg_id, media_type, is_album "
@@ -824,8 +839,7 @@ class MemeBot:
             await update.message.reply_text(f"...ещё {total - SHOWQUEUE_LIMIT} мемов.")
 
     async def cmd_clearsent(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        with sqlite3.connect(DB) as db:
-            db.execute("PRAGMA journal_mode=MEMORY")
+        with db_open() as db:
             n = db.execute(
                 "SELECT COUNT(*) FROM posts WHERE status IN ('new', 'sent')"
             ).fetchone()[0]
@@ -836,7 +850,7 @@ class MemeBot:
         )
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        with sqlite3.connect(DB) as db:
+        with db_open() as db:
             new_cnt      = db.execute("SELECT COUNT(*) FROM posts WHERE status='new'").fetchone()[0]
             approved_cnt = db.execute("SELECT COUNT(*) FROM posts WHERE status='approved'").fetchone()[0]
             skipped_cnt  = db.execute("SELECT COUNT(*) FROM posts WHERE status='skipped'").fetchone()[0]
@@ -854,7 +868,7 @@ class MemeBot:
 
     async def cmd_vacuum(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Чищу базу...")
-        with sqlite3.connect(DB) as db:
+        with db_open() as db:
             freed = db.execute(
                 "UPDATE posts SET img_data=NULL, file_id=NULL "
                 "WHERE status IN ('posted','skipped','error') AND img_data IS NOT NULL"
@@ -957,7 +971,7 @@ class MemeBot:
             return
 
         if action == "approve":
-            with sqlite3.connect(DB) as _db:
+            with db_open() as _db:
                 row = _db.execute("SELECT status FROM posts WHERE id=?", (post_id,)).fetchone()
             if not row or row[0] == "posted":
                 await query.edit_message_reply_markup(
@@ -975,7 +989,7 @@ class MemeBot:
             await query.message.reply_text(f"✅ Добавлено в очередь! В очереди: {db_queue_size()}")
 
         elif action == "caption":
-            with sqlite3.connect(DB) as _db:
+            with db_open() as _db:
                 row = _db.execute("SELECT status FROM posts WHERE id=?", (post_id,)).fetchone()
             if not row or row[0] == "posted":
                 await query.edit_message_reply_markup(
@@ -998,7 +1012,7 @@ class MemeBot:
             if self.pending_edit_caption and self.pending_edit_caption != post_id:
                 self.pending_edit_caption = None
             self.pending_edit_caption = post_id
-            with sqlite3.connect(DB) as _db:
+            with db_open() as _db:
                 row = _db.execute("SELECT user_caption FROM posts WHERE id=?", (post_id,)).fetchone()
             current = (row[0] if row and row[0] else "нет") if row else "нет"
             await query.message.reply_text(
@@ -1007,7 +1021,7 @@ class MemeBot:
             )
 
         elif action == "now":
-            with sqlite3.connect(DB) as _db:
+            with db_open() as _db:
                 row = _db.execute("SELECT status FROM posts WHERE id=?", (post_id,)).fetchone()
             if not row or row[0] == "posted":
                 await query.edit_message_reply_markup(
@@ -1105,7 +1119,7 @@ class MemeBot:
 
     async def _try_update_admin_markup(self, post_id: int, button_text: str):
         try:
-            with sqlite3.connect(DB) as _db:
+            with db_open() as _db:
                 row = _db.execute("SELECT tg_msg_id FROM posts WHERE id=?", (post_id,)).fetchone()
             if not row or not row[0]:
                 return
@@ -1281,7 +1295,7 @@ class MemeBot:
 
     async def post_next(self, priority_id: Optional[int] = None):
         """Возвращает (ok, published, err)."""
-        with sqlite3.connect(DB) as _db:
+        with db_open() as _db:
             if priority_id is not None:
                 rows = _db.execute(
                     "SELECT id, channel, msg_id, img_url, user_caption, file_id, media_type, is_album "
@@ -1356,7 +1370,7 @@ class MemeBot:
                         await self._try_update_admin_markup(post_id, "⚠️ Медиа пропало")
                         continue
 
-                with sqlite3.connect(DB) as _db:
+                with db_open() as _db:
                     _db.execute(
                         "UPDATE posts SET status='posted', posted_at=datetime('now'), img_data=NULL WHERE id=?",
                         (post_id,)
@@ -1392,7 +1406,7 @@ class MemeBot:
                 self.schedule    = make_schedule()
                 logging.info("Новый день! Расписание: "
                              + ", ".join(t.strftime("%H:%M") for t in self.schedule))
-                with sqlite3.connect(DB) as _db:
+                with db_open() as _db:
                     deleted = _db.execute(
                         "DELETE FROM posts WHERE status IN ('posted','skipped','error') "
                         "AND added_at < datetime('now', '-30 days')"
@@ -1462,7 +1476,7 @@ class MemeBot:
         saved = db_get("pending_caption")
         if saved:
             pid = int(saved)
-            with sqlite3.connect(DB) as _db:
+            with db_open() as _db:
                 row = _db.execute("SELECT status FROM posts WHERE id=?", (pid,)).fetchone()
             if row and row[0] not in ("posted", "skipped", "error"):
                 self.pending_caption = pid
