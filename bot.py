@@ -446,7 +446,8 @@ def db_get_new_posts() -> list:
     with sqlite3.connect(DB) as db:
         return db.execute(
             "SELECT id, channel, msg_id, img_url, caption, media_type, is_album "
-            "FROM posts WHERE status='new' ORDER BY added_at ASC LIMIT ?",
+            "FROM posts WHERE status='new' AND added_at > datetime('now', '-48 hours') "
+            "ORDER BY added_at ASC LIMIT ?",
             (MAX_SEND_PER_FETCH,)
         ).fetchall()
 
@@ -1396,10 +1397,15 @@ class MemeBot:
                         "UPDATE posts SET img_data=NULL, file_id=NULL "
                         "WHERE status IN ('posted','skipped','error') AND img_data IS NOT NULL"
                     ).rowcount
+                    # Старые непросмотренные посты — автоматически пропускаем
+                    expired = _db.execute(
+                        "UPDATE posts SET status='skipped' WHERE status IN ('new','sent') "
+                        "AND added_at < datetime('now', '-48 hours')"
+                    ).rowcount
                     _db.execute("VACUUM")
                     _db.commit()
-                if deleted or freed:
-                    logging.info(f"Очистка базы: удалено {deleted} записей, очищено img_data у {freed}")
+                if deleted or freed or expired:
+                    logging.info(f"Очистка базы: удалено {deleted}, img_data очищено у {freed}, просрочено {expired}")
 
             if self.last_fetch is None or (now - self.last_fetch).total_seconds() >= FETCH_INTERVAL:
                 await self.fetch_and_notify()
