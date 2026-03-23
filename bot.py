@@ -224,17 +224,20 @@ def emergency_cleanup_db():
     try:
         with sqlite3.connect(DB) as db:
             db.execute("PRAGMA journal_mode=MEMORY")
+            # Очищаем img_data у ВСЕХ постов — больше не храним бинарные данные
             freed = db.execute(
-                "UPDATE posts SET img_data=NULL, file_id=NULL "
-                "WHERE status IN ('posted','skipped','error') AND img_data IS NOT NULL"
+                "UPDATE posts SET img_data=NULL WHERE img_data IS NOT NULL"
+            ).rowcount
+            freed_album = db.execute(
+                "UPDATE album_media SET img_data=NULL WHERE img_data IS NOT NULL"
             ).rowcount
             deleted = db.execute(
                 "DELETE FROM posts WHERE status IN ('posted','skipped','error') "
                 "AND added_at < datetime('now', '-14 days')"
             ).rowcount
             db.commit()
-        if freed or deleted:
-            logging.info(f"Стартовая очистка: img_data очищено у {freed}, удалено {deleted} записей")
+        if freed or freed_album or deleted:
+            logging.info(f"Стартовая очистка: posts={freed}, album_media={freed_album}, удалено={deleted}")
     except Exception as e:
         logging.warning(f"Стартовая очистка не удалась: {e}")
 
@@ -822,6 +825,7 @@ class MemeBot:
 
     async def cmd_clearsent(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         with sqlite3.connect(DB) as db:
+            db.execute("PRAGMA journal_mode=MEMORY")
             n = db.execute(
                 "SELECT COUNT(*) FROM posts WHERE status IN ('new', 'sent')"
             ).fetchone()[0]
