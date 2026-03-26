@@ -50,7 +50,7 @@ FETCH_HOURS_BACK   = 24
 MAX_SEND_PER_FETCH = 25
 SHOWQUEUE_LIMIT    = 10
 PHASH_THRESHOLD    = 10
-MIN_VIEWS          = 1000
+MIN_VIEWS_PER_HOUR = 150
 
 # ─────────────────────────────────────────────────────────────────────
 #  КОНФИГ
@@ -117,6 +117,7 @@ async def fetch_channel(session: aiohttp.ClientSession, channel: str,
                     continue
 
                 # Фильтр по времени
+                post_time = None
                 time_el = msg.find("time")
                 if time_el and time_el.get("datetime"):
                     try:
@@ -128,7 +129,7 @@ async def fetch_channel(session: aiohttp.ClientSession, channel: str,
                     except Exception:
                         pass
 
-                # Просмотры
+                # Просмотры — фильтр по скорости набора (просмотры/час)
                 views_el = msg.find("span", class_="tgme_widget_message_views")
                 if views_el:
                     views_text = views_el.get_text(strip=True).upper().replace("\u00A0", "")
@@ -141,7 +142,11 @@ async def fetch_channel(session: aiohttp.ClientSession, channel: str,
                             views = int(views_text)
                     except ValueError:
                         views = 0
-                    if views < MIN_VIEWS:
+                    if post_time:
+                        age_hours = max((datetime.now(timezone.utc) - post_time).total_seconds() / 3600, 0.25)
+                    else:
+                        age_hours = 1.0
+                    if views / age_hours < MIN_VIEWS_PER_HOUR:
                         continue
 
                 # Подпись
