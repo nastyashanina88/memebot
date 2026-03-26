@@ -50,6 +50,7 @@ FETCH_HOURS_BACK   = 24
 MAX_SEND_PER_FETCH = 25
 SHOWQUEUE_LIMIT    = 10
 PHASH_THRESHOLD    = 10
+MIN_VIEWS          = 1000
 
 # ─────────────────────────────────────────────────────────────────────
 #  КОНФИГ
@@ -126,6 +127,22 @@ async def fetch_channel(session: aiohttp.ClientSession, channel: str,
                             continue
                     except Exception:
                         pass
+
+                # Просмотры
+                views_el = msg.find("span", class_="tgme_widget_message_views")
+                if views_el:
+                    views_text = views_el.get_text(strip=True).upper().replace("\u00A0", "")
+                    try:
+                        if "K" in views_text:
+                            views = int(float(views_text.replace("K", "")) * 1000)
+                        elif "M" in views_text:
+                            views = int(float(views_text.replace("M", "")) * 1_000_000)
+                        else:
+                            views = int(views_text)
+                    except ValueError:
+                        views = 0
+                    if views < MIN_VIEWS:
+                        continue
 
                 # Подпись
                 text_el = msg.find("div", class_="tgme_widget_message_text")
