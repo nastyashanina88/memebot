@@ -1495,6 +1495,18 @@ class MemeBot:
         self._post_lock       = asyncio.Lock()
         self._fetch_semaphore = asyncio.Semaphore(8)
 
+        # HTTP health endpoint (нужен для Render free tier)
+        async def _health(request):
+            return aiohttp.web.Response(text="OK")
+        _web = aiohttp.web.Application()
+        _web.router.add_get("/", _health)
+        _web.router.add_get("/health", _health)
+        _runner = aiohttp.web.AppRunner(_web)
+        await _runner.setup()
+        _port = int(os.getenv("PORT", 10000))
+        await aiohttp.web.TCPSite(_runner, "0.0.0.0", _port).start()
+        logging.info(f"Health server on port {_port}")
+
         saved = db_get("pending_caption")
         if saved:
             pid = int(saved)
