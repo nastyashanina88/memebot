@@ -1496,15 +1496,14 @@ class MemeBot:
         self._fetch_semaphore = asyncio.Semaphore(8)
 
         # HTTP health endpoint (нужен для Render free tier)
-        async def _health(request):
-            return aiohttp.web.Response(text="OK")
-        _web = aiohttp.web.Application()
-        _web.router.add_get("/", _health)
-        _web.router.add_get("/health", _health)
-        _runner = aiohttp.web.AppRunner(_web)
-        await _runner.setup()
+        async def _health_handler(reader, writer):
+            await reader.read(4096)
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nOK")
+            await writer.drain()
+            writer.close()
         _port = int(os.getenv("PORT", 10000))
-        await aiohttp.web.TCPSite(_runner, "0.0.0.0", _port).start()
+        _srv = await asyncio.start_server(_health_handler, "0.0.0.0", _port)
+        asyncio.get_event_loop().create_task(_srv.serve_forever())
         logging.info(f"Health server on port {_port}")
 
         saved = db_get("pending_caption")
