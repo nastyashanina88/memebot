@@ -9,6 +9,7 @@ import logging
 import os
 import random
 import re
+import re as _re
 import sqlite3
 import sys
 from contextlib import contextmanager
@@ -60,6 +61,7 @@ BOT_TOKEN     = os.getenv("BOT_TOKEN", "").strip()
 MY_CHANNEL    = os.getenv("MY_CHANNEL", "").strip()
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
 MSK           = pytz.timezone("Europe/Moscow")
+_DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 # ─────────────────────────────────────────────────────────────────────
 #  ФИЛЬТРЫ
@@ -242,19 +244,98 @@ _default_db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data
 os.makedirs(_default_db_dir, exist_ok=True)
 DB = os.path.join(os.getenv("DATA_DIR", _default_db_dir), "memes.db")
 
-@contextmanager
-def db_open():
-    """Открывает соединение с БД с journal_mode=MEMORY — безопасно на полном диске."""
-    conn = sqlite3.connect(DB)
-    conn.execute("PRAGMA journal_mode=MEMORY")
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+# ── PostgreSQL адаптер ────────────────────────────────────────────────
+
+def _pg_sql(sql: str) -> str:
+    """Конвертирует SQLite SQL в PostgreSQL."""
+    is_insert_ignore = bool(_re.search(r'\bINSERT\s+OR\s+IGNORE\b', sql, _re.I))
+    sql = sql.replace('?', '%s')
+    sql = _re.sub(r'\bINSERT\s+OR\s+(IGNORE|REPLACE)\b', 'INSERT', sql, flags=_re.I)
+    sql = _re.sub(r"datetime\('now'\)", 'NOW()', sql)
+    sql = _re.sub(
+        r"datetime\('now',\s*'(-?\d+)\s+(days?|hours?)'\)",
+        lambda m: f"NOW() + INTERVAL '{m.group(1)} {m.group(2)}'",
+        sql
+    )
+    sql = _re.sub(r'\bAUTOINCREMENT\b', '', sql, flags=_re.I)
+    sql = _re.sub(r'INTEGER\s+PRIMARY\s+KEY', 'BIGSERIAL PRIMARY KEY', sql, flags=_re.I)
+    sql = _re.sub(r'\bBLOB\b', 'BYTEA', sql, flags=_re.I)
+    sql = _re.sub(r'^\s*VACUUM\s*;?\s*$', 'SELECT 1', sql, flags=_re.I | _re.M)
+    sql = _re.sub(r'\bADD\s+COLUMN\b(?!\s+IF\s+NOT\s+EXISTS\b)', 'ADD COLUMN IF NOT EXISTS', sql, flags=_re.I)
+    if is_insert_ignore and 'ON CONFLICT' not in sql.upper():
+        sql = sql.rstrip().rstrip(';') + ' ON CONFLICT DO NOTHING'
+    return sql
+
+
+class _PGResult:
+    """Имитирует sqlite3 курсор для совместимости."""
+    def __init__(self, cur, rowcount):
+        self._cur = cur
+        self.rowcount = rowcount
+        self.lastrowid = None
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+
+class _PGConn:
+    """Обёртка psycopg2 с интерфейсом sqlite3."""
+    def __init__(self, conn):
+        self._conn = conn
+        self._cur = conn.cursor()
+
+    def execute(self, sql, params=()):
+        self._cur.execute(_pg_sql(sql), params if params else None)
+        return _PGResult(self._cur, self._cur.rowcount)
+
+    def executemany(self, sql, seq):
+        self._cur.executemany(_pg_sql(sql), seq)
+        return _PGResult(self._cur, self._cur.rowcount)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._cur.close()
+        self._conn.close()
+
+
+if _DATABASE_URL:
+    import psycopg2
+
+    @contextmanager
+    def db_open():
+        conn = psycopg2.connect(_DATABASE_URL)
+        wrapper = _PGConn(conn)
+        try:
+            yield wrapper
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            wrapper.close()
+
+else:
+    @contextmanager
+    def db_open():
+        """Открывает соединение с БД с journal_mode=MEMORY — безопасно на полном диске."""
+        conn = sqlite3.connect(DB)
+        conn.execute("PRAGMA journal_mode=MEMORY")
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def emergency_cleanup_db():
@@ -354,7 +435,14 @@ def db_get(key: str) -> Optional[str]:
 
 def db_set(key: str, value: str):
     with db_open() as db:
-        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value))
+        if _DATABASE_URL:
+            db.execute(
+                "INSERT INTO settings (key, value) VALUES (%s, %s) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                (key, value)
+            )
+        else:
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value))
         db.commit()
 
 
@@ -399,16 +487,28 @@ def db_save_post(channel, msg_id, img_url, caption,
                  is_album: bool = False) -> Optional[int]:
     try:
         with db_open() as db:
-            cur = db.execute(
-                "INSERT OR IGNORE INTO posts "
-                "(channel, msg_id, img_url, caption, img_hash, media_type, phash, is_album) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (channel, msg_id, img_url, caption,
-                 img_hash, media_type, phash, int(is_album)),
-            )
-            db.commit()
-            if cur.lastrowid:
-                return cur.lastrowid
+            if _DATABASE_URL:
+                cur = db.execute(
+                    "INSERT INTO posts "
+                    "(channel, msg_id, img_url, caption, img_hash, media_type, phash, is_album) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT (channel, msg_id) DO NOTHING RETURNING id",
+                    (channel, msg_id, img_url, caption,
+                     img_hash, media_type, phash, int(is_album)),
+                )
+                row = cur.fetchone()
+                db.commit()
+                return row[0] if row else None
+            else:
+                cur = db.execute(
+                    "INSERT OR IGNORE INTO posts "
+                    "(channel, msg_id, img_url, caption, img_hash, media_type, phash, is_album) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (channel, msg_id, img_url, caption,
+                     img_hash, media_type, phash, int(is_album)),
+                )
+                db.commit()
+                return cur.lastrowid if cur.lastrowid else None
     except Exception as e:
         logging.error(f"db_save_post: {e}")
     return None
