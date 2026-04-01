@@ -308,19 +308,30 @@ class _PGConn:
 
 if _DATABASE_URL:
     import psycopg2
+    import psycopg2.pool
+
+    _pg_pool = None
+
+    def _get_pool():
+        global _pg_pool
+        if _pg_pool is None:
+            _pg_pool = psycopg2.pool.SimpleConnectionPool(1, 3, _DATABASE_URL)
+        return _pg_pool
 
     @contextmanager
     def db_open():
-        conn = psycopg2.connect(_DATABASE_URL)
-        wrapper = _PGConn(conn)
+        pool = _get_pool()
+        conn = pool.getconn()
         try:
+            conn.autocommit = False
+            wrapper = _PGConn(conn)
             yield wrapper
             conn.commit()
         except Exception:
             conn.rollback()
             raise
         finally:
-            wrapper.close()
+            pool.putconn(conn)
 
 else:
     @contextmanager
