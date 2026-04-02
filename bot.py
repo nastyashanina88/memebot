@@ -310,26 +310,35 @@ if _DATABASE_URL:
     import psycopg2
 
     _PG_DSN = _DATABASE_URL if "connect_timeout" in _DATABASE_URL else _DATABASE_URL + "&connect_timeout=10"
+    _pg_conn = None
+
+    def _get_conn():
+        global _pg_conn
+        if _pg_conn is None or _pg_conn.closed:
+            _pg_conn = psycopg2.connect(_PG_DSN)
+        return _pg_conn
 
     @contextmanager
     def db_open():
-        conn = psycopg2.connect(_PG_DSN)
+        global _pg_conn
+        conn = _get_conn()
         try:
             conn.autocommit = False
-            wrapper = _PGConn(conn)
-            yield wrapper
+            yield _PGConn(conn)
             conn.commit()
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            try:
+                _pg_conn.close()
+            except Exception:
+                pass
+            _pg_conn = None
+            raise
         except Exception:
             try:
                 conn.rollback()
             except Exception:
                 pass
             raise
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
 else:
     @contextmanager
