@@ -315,7 +315,8 @@ if _DATABASE_URL:
     def _get_pool():
         global _pg_pool
         if _pg_pool is None:
-            _pg_pool = psycopg2.pool.SimpleConnectionPool(1, 3, _DATABASE_URL)
+            dsn = _DATABASE_URL if "connect_timeout" in _DATABASE_URL else _DATABASE_URL + "&connect_timeout=10"
+            _pg_pool = psycopg2.pool.SimpleConnectionPool(1, 3, dsn)
         return _pg_pool
 
     @contextmanager
@@ -765,8 +766,7 @@ class MemeBot:
         self.session: Optional[aiohttp.ClientSession] = None
         self._post_lock: Optional[asyncio.Lock] = None
         self._fetch_semaphore: Optional[asyncio.Semaphore] = None
-        emergency_cleanup_db()
-        init_db()
+        pass  # DB init moved to run() after health server starts
 
     def _setup_app(self):
         self.app = Application.builder().token(BOT_TOKEN).build()
@@ -1645,6 +1645,9 @@ class MemeBot:
         _srv = await asyncio.start_server(_health_handler, "0.0.0.0", _port)
         asyncio.get_event_loop().create_task(_srv.serve_forever())
         logging.info(f"Health server on port {_port}")
+
+        emergency_cleanup_db()
+        init_db()
 
         saved = db_get("pending_caption")
         if saved:
