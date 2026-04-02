@@ -321,24 +321,27 @@ if _DATABASE_URL:
     @contextmanager
     def db_open():
         global _pg_conn
-        conn = _get_conn()
-        try:
-            conn.autocommit = False
-            yield _PGConn(conn)
-            conn.commit()
-        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+        for attempt in range(2):
+            conn = _get_conn()
             try:
-                _pg_conn.close()
+                conn.autocommit = False
+                yield _PGConn(conn)
+                conn.commit()
+                return
+            except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                try:
+                    _pg_conn.close()
+                except Exception:
+                    pass
+                _pg_conn = None
+                if attempt == 1:
+                    raise
             except Exception:
-                pass
-            _pg_conn = None
-            raise
-        except Exception:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            raise
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
 
 else:
     @contextmanager
