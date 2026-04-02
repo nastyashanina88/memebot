@@ -322,16 +322,22 @@ if _DATABASE_URL:
     def db_open():
         pool = _get_pool()
         conn = pool.getconn()
+        conn_ok = True
         try:
             conn.autocommit = False
             wrapper = _PGConn(conn)
             yield wrapper
             conn.commit()
         except Exception:
-            conn.rollback()
+            conn_ok = False
+            try:
+                conn.rollback()
+                conn_ok = True
+            except Exception:
+                pass
             raise
         finally:
-            pool.putconn(conn)
+            pool.putconn(conn, close=not conn_ok)
 
 else:
     @contextmanager
@@ -1547,66 +1553,71 @@ class MemeBot:
                 self.schedule    = make_schedule()
                 logging.info("Новый день! Расписание: "
                              + ", ".join(t.strftime("%H:%M") for t in self.schedule))
-                with db_open() as _db:
-                    deleted = _db.execute(
-                        "DELETE FROM posts WHERE status IN ('posted','skipped','error') "
-                        "AND added_at < datetime('now', '-30 days')"
-                    ).rowcount
-                    freed = _db.execute(
-                        "UPDATE posts SET img_data=NULL, file_id=NULL "
-                        "WHERE status IN ('posted','skipped','error') AND img_data IS NOT NULL"
-                    ).rowcount
-                    # Старые непросмотренные посты — автоматически пропускаем
-                    expired = _db.execute(
-                        "UPDATE posts SET status='skipped' WHERE status IN ('new','sent') "
-                        "AND added_at < datetime('now', '-48 hours')"
-                    ).rowcount
-                    _db.execute("VACUUM")
-                    _db.commit()
-                if deleted or freed or expired:
-                    logging.info(f"Очистка базы: удалено {deleted}, img_data очищено у {freed}, просрочено {expired}")
+                try:
+                    with db_open() as _db:
+                        deleted = _db.execute(
+                            "DELETE FROM posts WHERE status IN ('posted','skipped','error') "
+                            "AND added_at < datetime('now', '-30 days')"
+                        ).rowcount
+                        freed = _db.execute(
+                            "UPDATE posts SET img_data=NULL, file_id=NULL "
+                            "WHERE status IN ('posted','skipped','error') AND img_data IS NOT NULL"
+                        ).rowcount
+                        expired = _db.execute(
+                            "UPDATE posts SET status='skipped' WHERE status IN ('new','sent') "
+                            "AND added_at < datetime('now', '-48 hours')"
+                        ).rowcount
+                        _db.execute("VACUUM")
+                        _db.commit()
+                    if deleted or freed or expired:
+                        logging.info(f"Очистка базы: удалено {deleted}, img_data очищено у {freed}, просрочено {expired}")
+                except Exception as e:
+                    logging.error(f"Ошибка ежедневной очистки: {e}")
 
             if self.last_fetch is None or (now - self.last_fetch).total_seconds() >= FETCH_INTERVAL:
                 await self.fetch_and_notify()
 
             if self.schedule and now >= self.schedule[0]:
                 self.schedule.pop(0)
-                async with self._post_lock:
-                    ok, published, err = await self.post_next()
-                admin_id = db_get("admin_chat_id")
-                if not ok:
-                    logging.error(f"Плановая публикация не удалась: {err}")
-                    if admin_id:
-                        try:
-                            await self.app.bot.send_message(
-                                chat_id=admin_id, text=f"❌ Плановая публикация не удалась: {err}"
-                            )
-                        except Exception:
-                            pass
-                elif published:
-                    logging.info("Плановая публикация прошла успешно")
-                    if admin_id:
-                        next_times = ", ".join(t.strftime("%H:%M") for t in self.schedule) or "больше нет"
-                        try:
-                            await self.app.bot.send_message(
-                                chat_id=admin_id,
-                                text=f"📤 Опубликовано по расписанию\n"
-                                     f"Осталось в очереди: {db_queue_size()}\n"
-                                     f"Следующие слоты: {next_times}",
-                            )
-                        except Exception:
-                            pass
-                else:
-                    logging.warning("Плановая публикация: все посты битые")
-                    if admin_id:
-                        try:
-                            await self.app.bot.send_message(
-                                chat_id=admin_id,
-                                text="⚠️ Плановая публикация: нет постов с рабочим медиа. "
-                                     "Одобри новые через /fetch."
-                            )
-                        except Exception:
-                            pass
+                try:
+                    async with self._post_lock:
+                        ok, published, err = await self.post_next()
+                    admin_id = db_get("admin_chat_id")
+                    if not ok:
+                        logging.error(f"Плановая публикация не удалась: {err}")
+                        if admin_id:
+                            try:
+                                await self.app.bot.send_message(
+                                    chat_id=admin_id, text=f"❌ Плановая публикация не удалась: {err}"
+                                )
+                            except Exception:
+                                pass
+                    elif published:
+                        logging.info("Плановая публикация прошла успешно")
+                        if admin_id:
+                            next_times = ", ".join(t.strftime("%H:%M") for t in self.schedule) or "больше нет"
+                            try:
+                                await self.app.bot.send_message(
+                                    chat_id=admin_id,
+                                    text=f"📤 Опубликовано по расписанию\n"
+                                         f"Осталось в очереди: {db_queue_size()}\n"
+                                         f"Следующие слоты: {next_times}",
+                                )
+                            except Exception:
+                                pass
+                    else:
+                        logging.warning("Плановая публикация: все посты битые")
+                        if admin_id:
+                            try:
+                                await self.app.bot.send_message(
+                                    chat_id=admin_id,
+                                    text="⚠️ Плановая публикация: нет постов с рабочим медиа. "
+                                         "Одобри новые через /fetch."
+                                )
+                            except Exception:
+                                pass
+                except Exception as e:
+                    logging.error(f"Ошибка плановой публикации: {e}", exc_info=True)
 
             # Self-ping каждые 12 минут чтобы Render не засыпал
             if (now - self._last_ping).total_seconds() >= 720:
