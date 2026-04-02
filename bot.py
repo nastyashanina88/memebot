@@ -251,12 +251,12 @@ def _pg_sql(sql: str) -> str:
     is_insert_ignore = bool(_re.search(r'\bINSERT\s+OR\s+IGNORE\b', sql, _re.I))
     sql = sql.replace('?', '%s')
     sql = _re.sub(r'\bINSERT\s+OR\s+(IGNORE|REPLACE)\b', 'INSERT', sql, flags=_re.I)
-    sql = _re.sub(r"datetime\('now'\)", 'NOW()', sql)
     sql = _re.sub(
         r"datetime\('now',\s*'(-?\d+)\s+(days?|hours?)'\)",
-        lambda m: f"NOW() + INTERVAL '{m.group(1)} {m.group(2)}'",
+        lambda m: f"to_char((NOW() + INTERVAL '{m.group(1)} {m.group(2)}') AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')",
         sql
     )
+    sql = _re.sub(r"datetime\('now'\)", "to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')", sql)
     sql = _re.sub(r'\bAUTOINCREMENT\b', '', sql, flags=_re.I)
     sql = _re.sub(r'INTEGER\s+PRIMARY\s+KEY', 'BIGSERIAL PRIMARY KEY', sql, flags=_re.I)
     sql = _re.sub(r'\bBLOB\b', 'BYTEA', sql, flags=_re.I)
