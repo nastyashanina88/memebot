@@ -308,37 +308,28 @@ class _PGConn:
 
 if _DATABASE_URL:
     import psycopg2
-    import psycopg2.pool
 
-    _pg_pool = None
-
-    def _get_pool():
-        global _pg_pool
-        if _pg_pool is None:
-            dsn = _DATABASE_URL if "connect_timeout" in _DATABASE_URL else _DATABASE_URL + "&connect_timeout=10"
-            _pg_pool = psycopg2.pool.SimpleConnectionPool(1, 3, dsn)
-        return _pg_pool
+    _PG_DSN = _DATABASE_URL if "connect_timeout" in _DATABASE_URL else _DATABASE_URL + "&connect_timeout=10"
 
     @contextmanager
     def db_open():
-        pool = _get_pool()
-        conn = pool.getconn()
-        conn_ok = True
+        conn = psycopg2.connect(_PG_DSN)
         try:
             conn.autocommit = False
             wrapper = _PGConn(conn)
             yield wrapper
             conn.commit()
         except Exception:
-            conn_ok = False
             try:
                 conn.rollback()
-                conn_ok = True
             except Exception:
                 pass
             raise
         finally:
-            pool.putconn(conn, close=not conn_ok)
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 else:
     @contextmanager
