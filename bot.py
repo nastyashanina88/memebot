@@ -764,6 +764,12 @@ class MemeBot:
 
     def _setup_app(self):
         self.app = Application.builder().token(BOT_TOKEN).build()
+
+        async def _log_all(update: Update, ctx):
+            logging.info(f"UPDATE: {update.effective_user and update.effective_user.id} — {update.message and update.message.text}")
+        from telegram.ext import TypeHandler
+        self.app.add_handler(TypeHandler(Update, _log_all), group=-1)
+
         self.app.add_handler(CommandHandler("start",         self.cmd_start))
         self.app.add_handler(CommandHandler("help",          self.cmd_help))
         self.app.add_handler(CommandHandler("queue",         self.cmd_queue))
