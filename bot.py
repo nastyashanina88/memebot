@@ -1535,7 +1535,8 @@ class MemeBot:
             f"Расписание ({len(self.schedule)} постов): "
             + ", ".join(t.strftime("%H:%M") for t in self.schedule)
         )
-        self.last_fetch = datetime.now(MSK)
+        self.last_fetch  = datetime.now(MSK)
+        self._last_ping  = datetime.now(MSK)
 
         while True:
             now = datetime.now(MSK)
@@ -1605,6 +1606,16 @@ class MemeBot:
                             )
                         except Exception:
                             pass
+
+            # Self-ping каждые 12 минут чтобы Render не засыпал
+            if (now - self._last_ping).total_seconds() >= 720:
+                self._last_ping = now
+                try:
+                    url = f"https://memebot-8tqa.onrender.com/health"
+                    async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as _:
+                        pass
+                except Exception:
+                    pass
 
             await asyncio.sleep(30)
 
