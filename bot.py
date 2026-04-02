@@ -853,8 +853,13 @@ class MemeBot:
 
     async def cmd_fetch(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Проверяю каналы, подожди...")
-        await self.fetch_and_notify()
-        await self.resend_pending()
+        try:
+            await self.fetch_and_notify()
+            await self.resend_pending()
+        except Exception as e:
+            logging.error(f"cmd_fetch error: {e}", exc_info=True)
+            await update.message.reply_text(f"⚠️ Ошибка при фетче: {e}")
+            return
         await update.message.reply_text(f"Готово! В очереди одобрено: {db_queue_size()}")
 
     async def cmd_post(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1352,7 +1357,8 @@ class MemeBot:
 
                 phash_str = None
                 if post["media_type"] == "photo":
-                    phash_str = compute_phash(first_img)
+                    loop = asyncio.get_event_loop()
+                    phash_str = await loop.run_in_executor(None, compute_phash, first_img)
                     if phash_str and db_phash_is_duplicate(phash_str):
                         logging.debug(f"Дубликат (pHash) из @{post['channel']}, пропускаю")
                         continue
