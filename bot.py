@@ -1703,7 +1703,7 @@ if __name__ == "__main__":
             os.kill(old_pid, 0)
             logging.critical(f"Бот уже запущен (PID {old_pid}). Завершаю.")
             sys.exit(1)
-        except (ProcessLookupError, ValueError):
+        except (ProcessLookupError, ValueError, PermissionError):
             pass
 
     with open(PID_FILE, "w") as f:
