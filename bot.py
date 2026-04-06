@@ -1578,7 +1578,11 @@ class MemeBot:
                     logging.error(f"Ошибка ежедневной очистки: {e}")
 
             if self.last_fetch is None or (now - self.last_fetch).total_seconds() >= FETCH_INTERVAL:
-                await self.fetch_and_notify()
+                try:
+                    await self.fetch_and_notify()
+                except Exception as e:
+                    logging.error(f"Ошибка периодического fetch: {e}", exc_info=True)
+                    self.last_fetch = datetime.now(MSK)
 
             if self.schedule and now >= self.schedule[0]:
                 self.schedule.pop(0)
