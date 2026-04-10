@@ -4,6 +4,7 @@ Meme Bot — парсит каналы, присылает мемы тебе в 
 """
 
 import asyncio
+import bisect
 import hashlib
 import logging
 import os
@@ -1354,7 +1355,7 @@ class MemeBot:
 
                 phash_str = None
                 if post["media_type"] == "photo":
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     phash_str = await loop.run_in_executor(None, compute_phash, first_img)
                     if phash_str and db_phash_is_duplicate(phash_str):
                         logging.debug(f"Дубликат (pHash) из @{post['channel']}, пропускаю")
@@ -1573,7 +1574,7 @@ class MemeBot:
                         self.last_fetch = datetime.now(MSK)
 
                 if self.schedule and now >= self.schedule[0]:
-                    self.schedule.pop(0)
+                    slot = self.schedule.pop(0)
                     try:
                         async with self._post_lock:
                             ok, published, err = await self.post_next()
@@ -1613,6 +1614,7 @@ class MemeBot:
                                     pass
                     except Exception as e:
                         logging.error(f"Ошибка плановой публикации: {e}", exc_info=True)
+                        bisect.insort(self.schedule, slot)
 
                 # Self-ping каждые 12 минут чтобы Render не засыпал
                 if (now - self._last_ping).total_seconds() >= 720:
@@ -1641,7 +1643,7 @@ class MemeBot:
             writer.close()
         _port = int(os.getenv("PORT", 10000))
         _srv = await asyncio.start_server(_health_handler, "0.0.0.0", _port)
-        asyncio.get_event_loop().create_task(_srv.serve_forever())
+        asyncio.get_running_loop().create_task(_srv.serve_forever())
         logging.info(f"Health server on port {_port}")
 
         emergency_cleanup_db()
