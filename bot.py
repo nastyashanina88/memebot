@@ -1533,7 +1533,7 @@ class MemeBot:
             f"Расписание ({len(self.schedule)} постов): "
             + ", ".join(t.strftime("%H:%M") for t in self.schedule)
         )
-        self.last_fetch  = datetime.now(MSK)
+        self.last_fetch  = None  # fetch сразу при старте
         self._last_ping  = datetime.now(MSK)
 
         while True:
