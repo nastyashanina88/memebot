@@ -1575,9 +1575,11 @@ class MemeBot:
 
                 if self.schedule and now >= self.schedule[0]:
                     slot = self.schedule.pop(0)
+                    post_attempted = False
                     try:
                         async with self._post_lock:
                             ok, published, err = await self.post_next()
+                        post_attempted = True
                         admin_id = db_get("admin_chat_id")
                         if not ok:
                             logging.error(f"Плановая публикация не удалась: {err}")
@@ -1614,7 +1616,8 @@ class MemeBot:
                                     pass
                     except Exception as e:
                         logging.error(f"Ошибка плановой публикации: {e}", exc_info=True)
-                        bisect.insort(self.schedule, slot)
+                        if not post_attempted:
+                            bisect.insort(self.schedule, slot)
 
                 # Self-ping каждые 12 минут чтобы Render не засыпал
                 if (now - self._last_ping).total_seconds() >= 720:
