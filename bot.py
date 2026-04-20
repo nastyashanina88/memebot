@@ -42,8 +42,8 @@ SOURCE_CHANNELS = [
     "memesfs", "grustnie_memi", "tasamaDama", "plohoy_vladlen", "sammychoret",
 ]
 
-POSTS_PER_DAY_MIN  = 13
-POSTS_PER_DAY_MAX  = 15
+POSTS_PER_DAY_MIN  = 28
+POSTS_PER_DAY_MAX  = 32
 POST_START_HOUR    = 9
 POST_END_HOUR      = 22
 MAX_CAPTION_LEN    = 150
